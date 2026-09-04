@@ -1,0 +1,306 @@
+--- upstream_server.py	2026-09-01 21:59:58.967118884 +0800
++++ funasr_http_server_v2.py	2026-09-01 22:18:09.128651530 +0800
+@@ -2,6 +2,8 @@
+ import io
+ import logging
+ import os
++import shutil
++import traceback
+ import uuid
+ from pathlib import Path
+ from opencc import OpenCC
+@@ -175,6 +177,7 @@
+ os.makedirs(args.temp_dir, exist_ok=True)
+ 
+ logger.info("model loading")
++logger.info("ffmpeg binary: %s", shutil.which("ffmpeg") or "NOT_FOUND on PATH")
+ # load SenseVoice model
+ model_dir = args.model_dir
+ model = AutoModel(
+@@ -189,6 +192,105 @@
+     disable_log=True,
+ )
+ logger.info("loaded models!")
++import funasr
++import inspect as _inspect
++logger.info("funasr version: %s", getattr(funasr, "__version__", "unknown"))
++
++# ---------------------------------------------------------------------------
++# 老版本 FunASR 兼容补丁（双保险 + 诊断）：
++# 老版 SenseVoice 的 timestamp 元素可能是 [word, start_ms, end_ms]（词文本前缀），
++# 而老版 auto_model.inference_with_vad 做 VAD 偏移合并时直接 `t[0] += vadsegments[j][0]`，
++# 把 word(str) += int 抛 TypeError。
++#   补丁 1：post 方法（若存在）——统一 timestamp 元素为纯 [start_ms, end_ms] + 提取 words
++#   补丁 2：inference 方法（若存在）——调用返回前把结果里 timestamp 结构归一化
++#   诊断：funasr 版本 / 模型类型 / 方法是否存在 / 方法源码（塞进错误响应的 diagnostics）
++# ---------------------------------------------------------------------------
++_sv_model = getattr(model, "model", None)
++_sv_type = type(_sv_model).__name__ if _sv_model is not None else None
++_sv_has_post = hasattr(_sv_model, "post") if _sv_model is not None else False
++_sv_has_inference = hasattr(_sv_model, "inference") if _sv_model is not None else False
++_sv_post_src = ""
++_sv_inf_src = ""
++_patch_applied = False
++
++if _sv_model is not None:
++    for _name, _bucket in (("post", "_sv_post_src"), ("inference", "_sv_inf_src")):
++        _m = getattr(_sv_model, _name, None)
++        if _m is not None:
++            try:
++                _src = _inspect.getsource(_m)
++                globals()[_bucket] = _src[-1500:] if _name == "post" else _src[:800]
++            except Exception:
++                pass
++
++    # --- 补丁 1：post 方法（若存在） ---
++    if _sv_has_post:
++        _orig_post = _sv_model.post
++
++        def _patched_post(timestamp):
++            out = _orig_post(timestamp)
++            if isinstance(out, tuple) and len(out) == 2:
++                ts, words = out
++            else:
++                ts, words = out, []
++            clean, clean_words = [], []
++            for t in ts:
++                try:
++                    if len(t) >= 3:  # [word, start, end] -> [start, end] + 提取 word
++                        clean.append([int(t[1]), int(t[2])])
++                        clean_words.append(str(t[0]).replace("▁", ""))
++                    else:            # [start, end]
++                        clean.append([int(t[0]), int(t[1])])
++                except (TypeError, ValueError) as ex:
++                    logger.warning("post patch skip t=%s: %s", t, ex)
++                    continue
++            if not clean_words:
++                clean_words = [str(w).replace("▁", "") for w in (words or [])]
++            return clean, clean_words
++
++        _sv_model.post = _patched_post
++        logger.info("patched SenseVoice.post")
++        _patch_applied = True
++
++    # --- 补丁 2：inference 方法（若存在）——返回前归一化 timestamp 结构 ---
++    if _sv_has_inference:
++        _orig_inference = _sv_model.inference
++
++        def _patched_inference(*args, **kwargs):
++            out = _orig_inference(*args, **kwargs)
++            try:
++                results = out[0] if isinstance(out, (tuple, list)) else out
++                if isinstance(results, list):
++                    for r in results:
++                        if not isinstance(r, dict):
++                            continue
++                        ts = r.get("timestamp")
++                        if ts:
++                            clean, cw = [], []
++                            for t in ts:
++                                try:
++                                    if len(t) >= 3:
++                                        clean.append([int(t[1]), int(t[2])])
++                                        cw.append(str(t[0]).replace("▁", ""))
++                                    elif len(t) >= 2:
++                                        clean.append([int(t[0]), int(t[1])])
++                                except (TypeError, ValueError):
++                                    continue
++                            r["timestamp"] = clean
++                            if cw and "words" not in r:
++                                r["words"] = cw
++            except Exception as ex:
++                logger.warning("inference patch post-process failed: %s", ex)
++            return out
++
++        _sv_model.inference = _patched_inference
++        logger.info("patched SenseVoice.inference (timestamp 结构归一化)")
++        _patch_applied = True
++
++logger.info(
++    "ASR patch applied=%s sv_type=%s has_post=%s has_inference=%s",
++    _patch_applied, _sv_type, _sv_has_post, _sv_has_inference,
++)
+ # s2t converter
+ s2t_cc = OpenCC("s2t")
+ 
+@@ -282,8 +384,51 @@
+     return vtt
+ 
+ 
++def _build_segments_from_words(rec_result: dict, gap_s: float = 0.6) -> list:
++    """从 FunASR `output_timestamp=True` 的词级时间戳聚合出句子级 segments。
++
++    SenseVoice 推理（funasr/models/sense_voice/model.py）在
++    `output_timestamp=True` 时通过 CTC forced align 返回词级时间戳：
++      rec_result["timestamp"] = [[start_ms, end_ms], ...]  （毫秒，与 words 对齐）
++      rec_result["words"]     = [词, ...]
++    这里把相邻词之间的静音 gap 超过 gap_s 秒的位置当作句子边界切段。
++    不依赖任何标点（punc）模型——SenseVoice 本身没有 sentence_info。
++    """
++    words = rec_result.get("words") or []
++    ts = rec_result.get("timestamp") or []
++    if not words or len(ts) != len(words):
++        return []
++    segments = []
++    cur_words, cur_start, prev_end = [], None, None
++    for w, (s_ms, e_ms) in zip(words, ts):
++        s, e = s_ms / 1000.0, e_ms / 1000.0
++        if cur_start is None:
++            cur_start = s
++        if prev_end is not None and s - prev_end > gap_s and cur_words:
++            seg_text = "".join(cur_words).strip()
++            if seg_text:
++                segments.append({
++                    "start": round(cur_start, 3),
++                    "end": round(prev_end, 3),
++                    "text": seg_text,
++                })
++            cur_words, cur_start = [], s
++        cur_words.append(w)
++        prev_end = e
++    if cur_words:
++        seg_text = "".join(cur_words).strip()
++        if seg_text:
++            segments.append({
++                "start": round(cur_start, 3),
++                "end": round(prev_end or cur_start, 3),
++                "text": seg_text,
++            })
++    return segments
++
++
+ def format_transcription_response(
+-    text: str, response_format: str = "json", duration: float = None, language: str = None
++    text: str, response_format: str = "json", duration: float = None,
++    language: str = None, segments: list = None,
+ ):
+     """
+     將辨識結果格式化為指定的回應格式
+@@ -293,6 +438,7 @@
+         response_format: 回應格式 (json, text, verbose_json, srt, vtt)
+         duration: 音頻時長（秒）
+         language: 檢測到的語言
++        segments: 帶時間戳的分段（verbose_json 使用）
+     
+     Returns:
+         格式化後的回應
+@@ -307,6 +453,7 @@
+             "language": language or "zh",
+             "duration": duration,
+             "text": text,
++            "segments": segments or [],
+         }
+     elif response_format == "srt":
+         return format_srt(text, duration)
+@@ -394,6 +541,9 @@
+         "merge_vad": args.merge_vad,
+         "merge_length_s": args.merge_length_s,
+         "output_dir": None,
++        # SenseVoice 原生词级时间戳：CTC forced align 返回
++        # rec_result["timestamp"]（[[start_ms,end_ms],...]）+ rec_result["words"]
++        "output_timestamp": True,
+     }
+     
+     try:
+@@ -401,6 +551,12 @@
+         audio_path = f"{args.temp_dir}/{str(uuid.uuid1())}.{suffix}"
+         async with aiofiles.open(audio_path, "wb") as out_file:
+             await out_file.write(content)
++        # 探测音频时长（用于末段 end 修正与 verbose_json 的 duration 字段）
++        audio_duration = None
++        try:
++            audio_duration = sf.info(audio_path).duration
++        except Exception as ex:
++            logger.warning("sf.info 失败: %s", ex)
+         if "Fun-ASR-Nano" in args.model_dir:
+             rec_results = model.generate(input=[audio_path], cache={}, batch_size=1, is_final=True, **inference_params)
+         else:
+@@ -409,17 +565,48 @@
+                 audio_array = process_audio_bytes_torchaudio(content)
+                 rec_results = model.generate(input=audio_array, is_final=True, **inference_params)
+             except Exception as torchaudio_error:
+-                # 如果 torchaudio 失敗，回退到 ffmpeg
+-                logger.warning(f"torchaudio 處理失敗：{torchaudio_error}，回退到 ffmpeg")
+-                audio_bytes = process_audio_bytes_ffmpeg(audio_path)
+-                rec_results = model.generate(input=audio_bytes, is_final=True, **inference_params)
++                # 三级降级：torchaudio -> 文件路径（FunASR 内部解码） -> ffmpeg
++                # 全部失败时返回每级异常 + torchaudio 完整 traceback，不再掩盖真因
++                logger.warning(f"torchaudio 處理失敗：{torchaudio_error}，回退到文件路徑推理", exc_info=True)
++                tb_torch = traceback.format_exc()[-4000:]
++                try:
++                    logger.info("使用文件路徑推理...")
++                    rec_results = model.generate(input=[audio_path], cache={}, batch_size=1, is_final=True, **inference_params)
++                except Exception as path_error:
++                    logger.warning(f"文件路徑推理失敗：{path_error}，回退到 ffmpeg", exc_info=True)
++                    try:
++                        audio_bytes = process_audio_bytes_ffmpeg(audio_path)
++                        rec_results = model.generate(input=audio_bytes, is_final=True, **inference_params)
++                    except Exception as ffmpeg_error:
++                        logger.error("ffmpeg 回退也失敗", exc_info=True)
++                        return {
++                            "error": {
++                                "message": (
++                                    f"torchaudio[{type(torchaudio_error).__name__}: {torchaudio_error}] "
++                                    f"filepath[{type(path_error).__name__}: {path_error}] "
++                                    f"ffmpeg[{type(ffmpeg_error).__name__}: {ffmpeg_error}] "
++                                    f"(ffmpeg_binary={shutil.which('ffmpeg') or 'NOT_FOUND'})"
++                                ),
++                                "traceback": tb_torch,
++                                "diagnostics": {
++                                    "funasr_version": getattr(funasr, "__version__", "unknown"),
++                                    "sv_model_type": _sv_type,
++                                    "sv_has_post": _sv_has_post,
++                                    "sv_has_inference": _sv_has_inference,
++                                    "patch_applied": _patch_applied,
++                                    "post_src_tail": _sv_post_src,
++                                    "inference_src_head": _sv_inf_src,
++                                },
++                                "type": "invalid_request_error",
++                            }
++                        }
+         
+         # 清理臨時文件
+         if os.path.exists(audio_path):
+             os.remove(audio_path)
+     except Exception as e:
+-        logger.error(f"音頻文件處理錯誤：{e}")
+-        return {"error": {"message": "Audio file processing failed", "type": "invalid_request_error"}}
++        logger.error(f"音頻文件處理錯誤：{e}", exc_info=True)
++        return {"error": {"message": f"Processing failed: {type(e).__name__}: {e}", "type": "invalid_request_error"}}
+ 
+     # 執行辨識
+     try:
+@@ -441,12 +628,31 @@
+         text = s2t_cc.convert(text)
+         if args.llm_correct:
+             text = llm_correction(text)
+-        
++
++        # 词级时间戳 -> 句子级 segments（无 punc 依赖）
++        segments = _build_segments_from_words(rec_result)
++        # 修正 end：老版 SenseVoice 段内词时间戳挤在段首，导致 end≈start。
++        # 用后一段的 start 作为前一段的 end；末段 end 用音频总时长。
++        for i in range(len(segments) - 1):
++            if segments[i]["end"] < segments[i + 1]["start"]:
++                segments[i]["end"] = segments[i + 1]["start"]
++        if segments and audio_duration and segments[-1]["end"] < audio_duration:
++            segments[-1]["end"] = round(audio_duration, 3)
++        logger.info(
++            "REC KEYS=%s words_len=%s segments_len=%s duration=%s",
++            list(rec_result.keys()),
++            len(rec_result.get("words") or []),
++            len(segments),
++            audio_duration,
++        )
++
+         # 格式化回應
+         formatted_response = format_transcription_response(
+             text=text,
+             response_format=response_format,
+-            language=language
++            language=language,
++            duration=audio_duration,
++            segments=segments,
+         )
+         
+         # logger.info(f"OpenAI API 辨識結果：{text[:100]}...")

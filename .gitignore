@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.env
+/data/
+/videorag-data/
+dist/
+web/node_modules/
+web/dist/
+.workbuddy/
+.data/
+
+# 本地降级 ASR 侧车：大模型与本地 venv 不入库（模型经 videorag 下载/共享卷挂载）
+deploy/asr/models/
+deploy/asr/.venv/
+
+# 本机数据目录 override（指向 ./.data，含真实数据路径，不入库）
+docker-compose.override.yml
+
+# compose 文件本地备份（不入库）
+deploy/compose-backups/
+
+# 本地生成物（笔记导出、UI 参考）
+outputs/

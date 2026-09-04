@@ -1,0 +1,94 @@
+# =============================================================================
+# videoRAG —— 标准初始化 docker-compose（适用于他人快速上手 / 全新部署）
+#
+# 使用前（首次）：
+#   1. cp .env.example .env        # 拷贝环境变量模板
+#   2. 编辑 .env 填入你的 LLM API Key（默认 DeepSeek，任意 OpenAI 兼容均可）
+#   3. docker compose up -d        # 启动主服务 → http://localhost:8080
+#   4.（可选·本地 ASR）首次启动后在「设置 → 本地模型」下载 SenseVoice /
+#      bge-small 模型，再执行：
+#      docker compose --profile local-asr up -d
+#
+# 本文件不含任何内网 IP / 密钥：全部配置经 ${VAR:-默认值} 从项目 .env 注入，
+# 未拷贝 .env 时也能以纯本地档位（fastembed + 本地 SenseVoice）直接跑起来。
+#
+# 数据目录统一为 ./data（videorag 与 asr 侧车共享，模型/库/笔记都在里面）：
+#   videorag 读写 /data；asr 只读共享 /data/models/asr。
+# 注意：本机如果已有裸机/旧目录数据，可用 docker-compose.override.yml
+# （已被 .gitignore 忽略）把 ./data 改挂到真实数据目录，勿改动本文件。
+# =============================================================================
+
+name: videorag
+
+services:
+  # ---------------- 主服务（FastAPI + 前端静态资源） ----------------
+  videorag:
+    build: .
+    image: videorag:latest
+    container_name: videorag
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 数据目录：视频/向量库/笔记/模型/运行时配置均持久化于此
+      # 本机有真实数据时用 override 改挂（勿直接改本文件）
+      - ./data:/data
+    environment:
+      # ============ LLM（OpenAI 兼容；provider 仅作标识，base_url+model 决定实际调用）============
+      LLM_PROVIDER: "${LLM_PROVIDER:-deepseek}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"                  # 必填：你的服务商 API Key
+      LLM_BASE_URL: "${LLM_BASE_URL:-https://api.deepseek.com}"
+      LLM_MODEL: "${LLM_MODEL:-deepseek-v4-flash}"
+
+      # ============ Embedding ============
+      # 默认本地 fastembed（CPU 友好，bge-small-zh 首次使用自动下载，无需远程）。
+      # 切远程 OpenAI 兼容：EMBED_PROVIDER=openai + EMBED_BASE_URL/MODEL/KEY。
+      EMBED_PROVIDER: "${EMBED_PROVIDER:-fastembed}"
+      EMBED_MODEL: "${EMBED_MODEL:-BAAI/bge-small-zh-v1.5}"
+      EMBED_BASE_URL: "${EMBED_BASE_URL:-}"
+      EMBED_API_KEY: "${EMBED_API_KEY:-}"
+
+      # ============ ASR ============
+      # 档位一·集中远程 ASR（配置非空即启用，如局域网 SenseVoice /
+      #   faster-whisper-server）：CLOUD_ASR_PROVIDER/BASE_URL/MODEL/KEY
+      # 档位二·本地 SenseVoice 侧车：CLOUD_ASR_* 留空，启用下方 local-asr
+      #   profile（需先在「设置 → 本地模型」下载模型到 ./data/models/asr）
+      CLOUD_ASR_PROVIDER: "${CLOUD_ASR_PROVIDER:-}"
+      CLOUD_ASR_BASE_URL: "${CLOUD_ASR_BASE_URL:-}"
+      CLOUD_ASR_MODEL: "${CLOUD_ASR_MODEL:-}"
+      CLOUD_ASR_KEY: "${CLOUD_ASR_KEY:-}"
+      # 本地侧车端点（容器网内固定别名；仅本地档位命中，远程档位忽略）
+      LOCAL_ASR_BASE_URL: "http://asr:9991"
+
+      # ============ 其他 ============
+      MCP_API_KEY: "${MCP_API_KEY:-change-me}"         # MCP 鉴权（建议修改）
+      # COOKIE_DIR: "/data/cookies"                    # 可选：抖音/小红书 cookie 目录
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------- 本地降级 ASR 侧车（sherpa-onnx + SenseVoice int8） ----------------
+  # 轻量镜像（不含模型）；模型由 videorag「设置 → 本地模型」下载到共享数据目录，
+  # 侧车只读加载。默认不启动：docker compose --profile local-asr up -d
+  # 不暴露宿主端口，videorag 经容器网 http://asr:9991 访问（调试可 override 放开）。
+  asr:
+    build: ./deploy/asr
+    image: videorag-asr:latest
+    container_name: videorag-asr
+    profiles: ["local-asr"]
+    restart: unless-stopped
+    volumes:
+      - ./data:/data:ro          # 与 videorag 共享同一数据目录（只读）
+    environment:
+      MODEL_DIR: "/data/models/asr"
+      NUM_THREADS: "${NUM_THREADS:-4}"
+      PORT: "9991"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9991/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
