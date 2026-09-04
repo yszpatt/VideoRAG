@@ -1,6 +1,6 @@
 # videoRAG
 
-把 B站 / YouTube / 抖音 / 小红书 / 任意直链的视频转成结构化笔记，落入 RAG 知识库，
+把 B站 / YouTube /  任意直链的视频转成结构化笔记，落入 RAG 知识库，
 支持自然语言问答（带时间戳引用，可跳回原视频）、关键词检索、Web UI 与 MCP agent 外挂。
 
 **单容器 all-in-one**，纯 CPU 可跑，适合部署在 NAS / 家用服务器 / VPS。
@@ -162,14 +162,14 @@ cp .env.example .env   # 按需修改
 |------|------|--------------|
 | B站 / YouTube | 字幕/音频/视频 | 可选（提升稳定性） |
 | 通用直链（mp4/m3u8 等） | 直接下载 | 否 |
-| 抖音 / 小红书 | 音频/视频 | **必需** |
+| 抖音 / 小红书（未经测试不保证能用） | 音频/视频 | **必需** |
 
 抖音/小红书需登录 cookie：用浏览器插件（如「Get cookies.txt LOCALLY」）导出 Netscape 格式
 cookie，按文件名放入数据目录 `cookies/`：
 
 ```text
-/data/cookies/douyin.txt          # 抖音
-/data/cookies/xhs.txt             # 小红书
+/data/cookies/douyin.txt          # 抖音（未测试）
+/data/cookies/xhs.txt             # 小红书（未测试）
 /data/cookies/bilibili.txt        # B站（可选）
 /data/cookies/youtube.txt         # YouTube（可选）
 ```
