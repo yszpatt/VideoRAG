@@ -68,12 +68,15 @@ services:
     # embedding 会叠加峰值；不限内存时一旦 OOM 会拖垮整台 NAS。限制后超限由内核
     # OOM 杀容器，restart: unless-stopped 自动拉起，宿主系统不受影响。
     # VIDEORAG_MEM_LIMIT 默认 2g，按 NAS 实际内存调整（模型常驻 ~350MB 后留转写余量）。
+    # pids 防 yt-dlp / ffmpeg 子进程失控 fork（每次转写会拉起若干子进程）。
+    # 注意：pids 必须写在 deploy.resources.limits 里，不能另外用顶层 pids_limit——
+    # Compose 视二者为同一字段，同时出现不同值会报
+    # "can't set distinct values on 'pids_limit' and 'deploy.resources.limits.pids'"。
     deploy:
       resources:
         limits:
           memory: "${VIDEORAG_MEM_LIMIT:-2g}"
-    # pids_limit 防 yt-dlp / ffmpeg 子进程失控 fork（每次转写会拉起若干子进程）。
-    pids_limit: 256
+          pids: 256
     # 日志轮转：避免 uvicorn/app 日志无限写入磁盘（默认 json-file 不轮转）。
     logging:
       driver: json-file
@@ -104,11 +107,12 @@ services:
       NUM_THREADS: "${NUM_THREADS:-4}"
       PORT: "9991"
     # SenseVoice int8 常驻 ≈240MB；限制内存防转写时无上限增长拖垮宿主。
+    # pids 同样并入 deploy.resources.limits（原因见主服务注释）。
     deploy:
       resources:
         limits:
           memory: "${VIDEORAG_ASR_MEM_LIMIT:-1g}"
-    pids_limit: 64
+          pids: 64
     logging:
       driver: json-file
       options:
