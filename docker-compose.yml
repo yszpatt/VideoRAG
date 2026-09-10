@@ -63,6 +63,23 @@ services:
       # ============ 其他 ============
       MCP_API_KEY: "${MCP_API_KEY:-change-me}"         # MCP 鉴权（建议修改）
       # COOKIE_DIR: "/data/cookies"                    # 可选：抖音/小红书 cookie 目录
+    # ---- 资源约束（NAS 单容器场景建议保留） ----
+    # 纯 CPU + 模型常驻（bge-small ≈100MB / SenseVoice ≈240MB）后，转写 / 笔记 /
+    # embedding 会叠加峰值；不限内存时一旦 OOM 会拖垮整台 NAS。限制后超限由内核
+    # OOM 杀容器，restart: unless-stopped 自动拉起，宿主系统不受影响。
+    # VIDEORAG_MEM_LIMIT 默认 2g，按 NAS 实际内存调整（模型常驻 ~350MB 后留转写余量）。
+    deploy:
+      resources:
+        limits:
+          memory: "${VIDEORAG_MEM_LIMIT:-2g}"
+    # pids_limit 防 yt-dlp / ffmpeg 子进程失控 fork（每次转写会拉起若干子进程）。
+    pids_limit: 256
+    # 日志轮转：避免 uvicorn/app 日志无限写入磁盘（默认 json-file 不轮转）。
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 30s
@@ -86,6 +103,17 @@ services:
       MODEL_DIR: "/data/models/asr"
       NUM_THREADS: "${NUM_THREADS:-4}"
       PORT: "9991"
+    # SenseVoice int8 常驻 ≈240MB；限制内存防转写时无上限增长拖垮宿主。
+    deploy:
+      resources:
+        limits:
+          memory: "${VIDEORAG_ASR_MEM_LIMIT:-1g}"
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9991/health', timeout=3)"]
       interval: 30s

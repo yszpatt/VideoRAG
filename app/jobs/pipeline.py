@@ -91,6 +91,7 @@ async def process_video(
         title = video.title or video.url
         platform = video.platform
 
+    media: FetchedMedia | None = None
     try:
         await _save(session_factory, video_id, status="fetching")
         meta = await _fetch_metadata_step(session_factory, video_id, url, cookie_dir)
@@ -123,14 +124,17 @@ async def process_video(
             )
 
         await _save(session_factory, video_id, status="done")
-        # 清理临时音频/视频（字幕文件保留）
+    except Exception as e:
+        await _save(session_factory, video_id, status="failed", error=str(e))
+    finally:
+        # 清理临时音频/视频（字幕文件保留）：成功与失败路径都清，避免转写/笔记
+        # 失败时把下载的 m4a/webm 留在 data/audio、data/downloads 里积盘。
+        # 仅在媒体已下载（media 非 None）且非字幕时删除。
         if media and media.kind in ("audio", "video") and media.path:
             try:
                 os.remove(media.path)
             except OSError:
                 pass
-    except Exception as e:
-        await _save(session_factory, video_id, status="failed", error=str(e))
 
 
 async def _save(session_factory, video_id, status=None, error=None):
@@ -265,6 +269,13 @@ def assert_model_compat(vector_store, embedder, vec: list[float]) -> None:
     checker({**fp, "dim": len(vec)})
 
 
+# embedding 分批大小：一次向量化/入库的切片上限。
+# 长视频（1h 视频 ≈ 400~900 块）若整批处理，本地 fastembed 的 ONNX 中间张量与
+# 远程 /v1/embeddings 的超长请求体都会把峰值内存抬高数倍；分批后峰值降到
+# 「单批 chunk + 单批向量」，长视频内存峰值可降 5~10 倍。短内容（≤ 一批）行为不变。
+EMBED_BATCH_SIZE = 64
+
+
 async def _embed_chunks(
     session_factory,
     video_id: str,
@@ -274,31 +285,44 @@ async def _embed_chunks(
     embedder,
     vector_store,
 ) -> None:
-    """切片 → 向量化 → LanceDB 入库 → SQLite chunks 表落库。"""
+    """切片 → 向量化 → LanceDB 入库 → SQLite chunks 表落库（分批流式）。
+
+    分批的意义是控制内存峰值而不是减少写入：每批 embed 完立即入库并释放该批
+    向量，避免「全部 chunk 的向量同时在内存」。批间通过 await 让事件循环有机会
+    回收。``ensure_fts_index`` 仍在全部批次写完后调用一次（每批建一次 FTS 索引
+    会造成重复索引构建，浪费 CPU 与磁盘）。
+    """
     chunks: list[Chunk] = chunk_segments(transcript.segments)
     if not chunks:
         return
-    vectors = await embedder.embed_texts([c.content for c in chunks])
-    assert_model_compat(vector_store, embedder, vectors[0])
-    rows: list[dict] = []
-    for c, v in zip(chunks, vectors):
-        cid = new_id()
-        rows.append(
-            {
-                "id": cid,
-                "video_id": video_id,
-                "content": c.content,
-                "embedding": v,
-                "start_sec": c.start_sec,
-                "end_sec": c.end_sec,
-                "title": title,
-                "platform": platform,
-                "kind": "content",
-            }
-        )
-    await asyncio.to_thread(vector_store.add, rows)
+    first_vec: list[float] | None = None
+    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[start : start + EMBED_BATCH_SIZE]
+        vectors = await embedder.embed_texts([c.content for c in batch])
+        if not vectors:
+            continue
+        if first_vec is None:
+            # 首向量用于模型指纹/维度校验（只需一次）
+            first_vec = vectors[0]
+            assert_model_compat(vector_store, embedder, first_vec)
+        rows: list[dict] = []
+        for c, v in zip(batch, vectors):
+            rows.append(
+                {
+                    "id": new_id(),
+                    "video_id": video_id,
+                    "content": c.content,
+                    "embedding": v,
+                    "start_sec": c.start_sec,
+                    "end_sec": c.end_sec,
+                    "title": title,
+                    "platform": platform,
+                    "kind": "content",
+                }
+            )
+        await asyncio.to_thread(vector_store.add, rows)
+        await _store_chunks(session_factory, video_id, rows)
     await asyncio.to_thread(vector_store.ensure_fts_index)
-    await _store_chunks(session_factory, video_id, rows)
 
 
 async def _embed_meta(
