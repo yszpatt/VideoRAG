@@ -44,9 +44,37 @@ def ensure_dirs(settings: Settings) -> None:
 
 
 def make_session_factory(settings: Settings) -> tuple[AsyncEngine, async_sessionmaker]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{settings.db_path}")
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{settings.db_path}",
+        connect_args={"timeout": 15},  # 写锁等待，避免瞬时锁冲突直接报错
+    )
+    _apply_sqlite_pragmas(engine)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     return engine, session_factory
+
+
+def _apply_sqlite_pragmas(engine: AsyncEngine) -> None:
+    """连接级 PRAGMA 调优（每次新建连接都执行）。
+
+    - journal_mode=WAL：写事务不再 rewrite 整个 db 文件（默认 DELETE 模式会产生
+      `db-journal` 并在提交时重写），显著降低笔记/评论/切片频繁增删时的磁盘写放大；
+      WAL 下读写并发也更好（读不阻塞写）。
+    - synchronous=NORMAL：WAL 模式下的推荐值，安全（崩溃最多丢最后一个事务）且更快。
+    - cache_size=-16000：约 16MB 页缓存（负值 = KiB），减少热数据的磁盘往返。
+    - busy_timeout=15000：与 connect_args timeout 一致，写锁竞争时等待而非立即失败。
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragmas(dbapi_conn, _record):  # noqa: ANN001
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute("PRAGMA cache_size=-16000")
+            cur.execute("PRAGMA busy_timeout=15000")
+        finally:
+            cur.close()
 
 
 async def _ensure_columns(engine: AsyncEngine) -> None:

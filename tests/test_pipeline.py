@@ -306,3 +306,35 @@ async def test_embed_chunks_batches_to_bound_memory(tmp_path):
         assert len(chunks) > EMBED_BATCH_SIZE
 
     await engine.dispose()
+
+
+def test_sweep_temp_media_clears_leftovers_only(tmp_path):
+    """启动清扫：删 downloads/audio/transcripts 下遗留文件，不动正式数据目录。"""
+    from app.jobs.pipeline import sweep_temp_media
+
+    # 三个临时目录各放遗留文件（含子目录）
+    for sub in ("downloads", "audio", "transcripts"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "leftover.mp3").write_bytes(b"x")
+    (tmp_path / "downloads" / "sub").mkdir()
+    (tmp_path / "downloads" / "sub" / "part.webm").write_bytes(b"x")
+    # 正式数据不应被清
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.md").write_text("keep")
+    (tmp_path / "thumbnails").mkdir()
+    (tmp_path / "thumbnails" / "a.jpg").write_bytes(b"x")
+
+    removed = sweep_temp_media(str(tmp_path))
+
+    assert removed == 4  # 3 + 1 子目录文件
+    for sub in ("downloads", "audio", "transcripts"):
+        leftovers = [p for p in (tmp_path / sub).rglob("*") if p.is_file()]
+        assert leftovers == []
+    assert (tmp_path / "notes" / "a.md").read_text() == "keep"
+    assert (tmp_path / "thumbnails" / "a.jpg").is_file()
+    # 目录本身保留
+    assert (tmp_path / "downloads").is_dir()
+
+    # 幂等：再跑一次无文件可删
+    assert sweep_temp_media(str(tmp_path)) == 0

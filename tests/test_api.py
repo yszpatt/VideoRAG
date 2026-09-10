@@ -159,6 +159,30 @@ async def test_get_video_detail(tmp_path):
     assert body["status"] == "pending"
 
 
+async def test_list_videos_failed_progress_from_light_query(tmp_path):
+    """列表接口：failed 视频的进度阶段仍由 segments/note/chunks 的存在性推断，
+    但改由轻量聚合查询取得（不再加载正文关联）。回归保护：
+    - failed + 有 segments 无 chunks → 卡在 noting 阶段（index 3）
+    - failed + 无任何数据 → 卡在 fetching（index 1）
+    """
+    app = _make_app(tmp_path)
+    c = await _client(app)
+
+    async with app.state.session_factory() as s:
+        s.add(Video(id="vA", platform="bilibili", url="u-a", status="failed", error="llm down"))
+        s.add(Video(id="vB", platform="bilibili", url="u-b", status="failed", error="fetch failed"))
+        # vA 有转写句子但无切片/笔记
+        s.add(OrmSegment(video_id="vA", start_sec=0.0, end_sec=1.0, text="hi"))
+        await s.commit()
+
+    r = await c.get("/api/videos")
+    await c.__aexit__(None, None, None)
+    assert r.status_code == 200
+    items = {i["id"]: i for i in r.json()}
+    assert items["vA"]["progress"]["stage"] == "noting"
+    assert items["vB"]["progress"]["stage"] == "fetching"
+
+
 async def test_get_video_404(tmp_path):
     app = _make_app(tmp_path)
     c = await _client(app)

@@ -19,7 +19,7 @@ from app.core.queue import Queue, TaskHandler, start_workers
 from app.core.runtime_config import load_runtime_env
 from app.core.vector_store import VectorStore, VectorStoreIncompatible
 from app.db import init_db, make_session_factory
-from app.jobs.pipeline import process_video
+from app.jobs.pipeline import process_video, sweep_temp_media
 from app.mcp_server import build_mcp_server, mcp_http_middleware
 
 
@@ -98,6 +98,15 @@ def create_app(
         recovered = await q.recover()
         if recovered:
             print(f"[queue] recovered {recovered} interrupted task(s)")
+        # 启动清扫临时媒体（downloads/audio/transcripts）：清掉被杀进程/失败路径
+        # 遗留的文件。此刻 worker 未启动且 recover 已把 running 重置为 pending，
+        # 清扫安全（被重置的任务会重新下载）。
+        try:
+            swept = await asyncio.to_thread(sweep_temp_media, settings.data_dir)
+            if swept:
+                print(f"[startup] swept {swept} stale temp media file(s)")
+        except Exception as e:  # 清扫失败不应阻断启动
+            print(f"[startup] temp media sweep skipped: {e}")
         worker = asyncio.create_task(start_workers(q, settings.max_concurrent_tasks))
         try:
             async with mcp_session_manager.run():  # MCP session 管理器随应用生命周期启停

@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, select
+from sqlalchemy.orm import noload
 
 from app.core.fetchers.ytdlp import detect_platform
 from app.core.notes import strip_quotes_section
@@ -30,7 +31,14 @@ class SubmitVideoResponse(BaseModel):
     status: str
 
 
-def _serialize_video(v: Video, thumb_dir: Path | None) -> dict:
+def _serialize_video(
+    v: Video,
+    thumb_dir: Path | None,
+    *,
+    has_segments: bool | None = None,
+    has_note: bool | None = None,
+    has_chunks: bool | None = None,
+) -> dict:
     return {
         "id": v.id,
         "platform": v.platform,
@@ -40,7 +48,9 @@ def _serialize_video(v: Video, thumb_dir: Path | None) -> dict:
         "duration_sec": v.duration_sec,
         "status": v.status,
         "error": v.error,
-        "progress": progress_for_video(v),
+        "progress": progress_for_video(
+            v, has_segments=has_segments, has_note=has_note, has_chunks=has_chunks
+        ),
         "created_at": v.created_at.isoformat() if v.created_at else None,
         # E1 元数据
         "description": v.description,
@@ -58,6 +68,38 @@ def _serialize_video(v: Video, thumb_dir: Path | None) -> dict:
             )
         ),
     }
+
+
+# 列表/详情查询显式关闭的重关联：这些关联默认 lazy="selectin"，加载 Video 时会
+# 顺带把每个视频的逐句转写（segments）、切片正文（chunks）、笔记 markdown（notes）、
+# 任务（tasks）全部拉进内存——列表页完全用不到，且前端每 3s 轮询一次，长视频多时
+# 是持续的内存与 I/O 浪费。进度推断所需的「是否存在」改由 _failed_flags 轻量查询。
+_HEAVY_RELATIONS = ("tasks", "segments", "chunks", "note")
+
+
+async def _failed_flags(session, videos: list[Video]) -> dict[str, dict]:
+    """为 failed 视频批量取 has_segments/has_note/has_chunks（只 count 不取全文）。
+
+    非 failed 视频不需要这些信息（进度由 status 决定），跳过。返回
+    {video_id: {"has_segments": bool, "has_note": bool, "has_chunks": bool}}，
+    未命中的视频由调用方以全 False 兜底。
+    """
+    failed_ids = [v.id for v in videos if v.status == "failed"]
+    if not failed_ids:
+        return {}
+    flags: dict[str, dict] = {
+        vid: {"has_segments": False, "has_note": False, "has_chunks": False}
+        for vid in failed_ids
+    }
+    for model, key in ((Segment, "has_segments"), (Chunk, "has_chunks"), (Note, "has_note")):
+        rows = await session.execute(
+            select(model.video_id)
+            .where(model.video_id.in_(failed_ids))
+            .group_by(model.video_id)
+        )
+        for vid in rows.scalars():
+            flags[vid][key] = True
+    return flags
 
 
 def _thumb_dir(request: Request) -> Path:
@@ -81,10 +123,19 @@ async def list_videos(request: Request, limit: int = 50):
     sf = request.app.state.session_factory
     async with sf() as s:
         rows = (
-            await s.execute(select(Video).order_by(Video.created_at.desc()).limit(limit))
+            await s.execute(
+                select(Video)
+                .options(*[noload(getattr(Video, r)) for r in _HEAVY_RELATIONS])
+                .order_by(Video.created_at.desc())
+                .limit(limit)
+            )
         ).scalars().all()
+        flags = await _failed_flags(s, rows)
     thumb_dir = _thumb_dir(request)
-    return [_serialize_video(v, thumb_dir) for v in rows]
+    return [
+        _serialize_video(v, thumb_dir, **flags.get(v.id, {}))
+        for v in rows
+    ]
 
 
 @router.get("/{video_id}")
@@ -92,9 +143,16 @@ async def get_video(video_id: str, request: Request):
     sf = request.app.state.session_factory
     thumb_dir = _thumb_dir(request)
     async with sf() as s:
-        v = await s.get(Video, video_id)
+        v = (
+            await s.execute(
+                select(Video)
+                .options(*[noload(getattr(Video, r)) for r in _HEAVY_RELATIONS])
+                .where(Video.id == video_id)
+            )
+        ).scalar_one_or_none()
         if v is None:
             raise HTTPException(404, "video not found")
+        flags = await _failed_flags(s, [v])
         comments = (
             await s.execute(
                 select(Comment)
@@ -104,7 +162,7 @@ async def get_video(video_id: str, request: Request):
             )
         ).scalars().all()
         return {
-            **_serialize_video(v, thumb_dir),
+            **_serialize_video(v, thumb_dir, **flags.get(v.id, {})),
             "comments": [
                 {
                     "author": c.author,

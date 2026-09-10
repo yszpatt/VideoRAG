@@ -387,3 +387,36 @@ async def _store_chunks(session_factory, video_id: str, rows: list[dict]) -> Non
                 )
             )
         await s.commit()
+
+
+# 启动清扫的临时媒体目录（相对 data_dir）。这些目录只放转写过程中的临时文件：
+# 下载的音频/视频、yt-dlp 中间产物、字幕暂存；正式数据在 notes/lancedb/db。
+_TEMP_MEDIA_DIRS = ("downloads", "audio", "transcripts")
+
+
+def sweep_temp_media(data_dir: str) -> int:
+    """启动时清空临时媒体目录，返回删除的文件数。
+
+    背景：转写成功/失败的临时音视频已由 process_video 的 finally 清理，但
+    yt-dlp 的中间产物、字幕暂存、以及被杀进程（SIGKILL/OOM）遗留的文件仍可能
+    积在 downloads/audio/transcripts 里。进程启动时任务队列尚未开始消费
+    （且 recover 会把 running 重置为 pending 重新下载），此刻清扫是安全的。
+
+    - 只删这三个临时目录下的**文件**（含子目录内的文件），不动目录本身；
+    - 任何 OSError 静默跳过（权限/占用），不阻塞启动；
+    - 返回删除计数，供日志打印。
+    """
+    removed = 0
+    for sub in _TEMP_MEDIA_DIRS:
+        d = Path(data_dir, sub)
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+

@@ -91,11 +91,34 @@ def compute_progress(
     }
 
 
-def progress_for_video(video) -> dict:
-    """从 ORM Video 实例派生进度（segments/note/chunks 均为 selectin 预加载）。"""
+def progress_for_video(
+    video,
+    *,
+    has_segments: bool | None = None,
+    has_note: bool | None = None,
+    has_chunks: bool | None = None,
+) -> dict:
+    """从 ORM Video 实例派生进度。
+
+    关联信息的获取策略（性能）：
+    - status != failed 时**完全不需要** segments/note/chunks（阶段由 status 决定），
+      因此不做任何关联查询；
+    - status == failed 时才需要它们来推断卡在哪一阶段。调用方可传入轻量的
+      has_segments/has_note/has_chunks（如批量 count 查询结果），避免为取「是否存在」
+      而把全文（逐句转写/切片正文/笔记 markdown）都加载进内存。
+    - 未传（None）时回退读取 ORM 关联属性，保持既有行为（直接调用/单测兼容）。
+    """
+    status = video.status
+    if status == "failed":
+        if has_segments is None:
+            has_segments = bool(getattr(video, "segments", None))
+        if has_note is None:
+            has_note = getattr(video, "note", None) is not None
+        if has_chunks is None:
+            has_chunks = bool(getattr(video, "chunks", None))
     return compute_progress(
-        video.status,
-        has_segments=bool(getattr(video, "segments", None)),
-        has_note=getattr(video, "note", None) is not None,
-        has_chunks=bool(getattr(video, "chunks", None)),
+        status,
+        has_segments=bool(has_segments),
+        has_note=bool(has_note),
+        has_chunks=bool(has_chunks),
     )

@@ -7,8 +7,8 @@ from app.models import Base, Chunk, Note, Segment, Task, Video
 
 
 @pytest.fixture
-async def session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def session(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/mem.sqlite")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     maker = async_sessionmaker(engine, expire_on_commit=False)
