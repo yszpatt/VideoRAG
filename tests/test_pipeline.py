@@ -216,3 +216,93 @@ async def test_process_video_marks_failed_on_note_error(tmp_path):
         assert v.status == "failed"
         assert "llm down" in v.error
     await engine.dispose()
+
+
+async def test_embed_chunks_batches_to_bound_memory(tmp_path):
+    """长视频切片必须分批向量化/入库（控内存峰值）。
+
+    行为契约：
+    - embedder.embed_texts 被多次调用，且每次入参不超过 EMBED_BATCH_SIZE；
+    - vector_store.add 被多次调用（每批一次）；
+    - ensure_fts_index 只在全部批次写完后调用一次（不随批次重复建索引）。
+    """
+    from pathlib import Path
+
+    from sqlalchemy import select
+
+    from app.config import Settings
+    from app.db import init_db, make_session_factory
+    from app.jobs.pipeline import EMBED_BATCH_SIZE
+    from app.models import Chunk, Video
+
+    settings = Settings(_env_file=None, data_dir=str(tmp_path))
+    engine, factory = make_session_factory(settings)
+    await init_db(engine, settings)
+    async with factory() as s:
+        s.add(Video(id="vidbig", platform="youtube", url="https://youtu.be/big", title="Big"))
+        await s.commit()
+
+    # 每个 segment 500 字符 = chunk_segments 的 max_chars，约每段独立成一块，
+    # 共 260 块 > 64（一批），确保跨批。
+    n_segments = 260
+    segments = [
+        Segment(start_sec=float(i), end_sec=float(i + 1), text="哈" * 500)
+        for i in range(n_segments)
+    ]
+
+    class CountingEmbedder:
+        def __init__(self):
+            self.batch_sizes = []
+
+        async def embed_texts(self, texts, query=False):
+            self.batch_sizes.append(len(texts))
+            return [[float(i), 1.0] for i in range(len(texts))]
+
+    class CountingStore:
+        def __init__(self):
+            self.add_calls = 0
+            self.rows = []
+            self.fts_calls = 0
+
+        def add(self, rows):
+            self.add_calls += 1
+            self.rows.extend(rows)
+
+        def ensure_fts_index(self):
+            self.fts_calls += 1
+
+        def has_kind_rows(self, video_id, kind="meta"):
+            return False
+
+    fetchers = [
+        FakeFetcher(
+            name="sub",
+            result=FetchedMedia(kind="subtitle", subtitle_text="x", meta={"segments": []}),
+        )
+    ]
+    transcribers = [
+        FakeTranscriber(
+            name="subtitle",
+            result=Transcript(segments=segments, raw_text="x", source="subtitle"),
+        )
+    ]
+    emb, store = CountingEmbedder(), CountingStore()
+    await process_video(
+        "vidbig", factory, fetchers, transcribers, FakeLLM(), str(tmp_path),
+        embedder=emb, vector_store=store,
+    )
+
+    # 分批：260 块 → 至少 2 批（64/批），每批不超限
+    assert len(emb.batch_sizes) >= 2
+    assert max(emb.batch_sizes) <= EMBED_BATCH_SIZE
+    assert sum(emb.batch_sizes) == len(store.rows)
+    # 每批一次 add；FTS 索引只建一次
+    assert store.add_calls == len(emb.batch_sizes)
+    assert store.fts_calls == 1
+
+    async with factory() as s:
+        chunks = (await s.execute(select(Chunk).where(Chunk.video_id == "vidbig"))).scalars().all()
+        assert len(chunks) == len(store.rows)
+        assert len(chunks) > EMBED_BATCH_SIZE
+
+    await engine.dispose()
