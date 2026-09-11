@@ -10,6 +10,7 @@ dist/
 web/node_modules/
 web/dist/
 .workbuddy/
+.codebuddy/
 .data/
 
 # 本地降级 ASR 侧车：大模型与本地 venv 不入库（模型经 videorag 下载/共享卷挂载）

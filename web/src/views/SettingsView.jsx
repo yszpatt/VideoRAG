@@ -38,6 +38,23 @@ const GROUPS = [
       { key: "model", label: "模型", placeholder: "bge-m3:latest" },
     ],
   },
+  {
+    key: "vlm",
+    title: "VLM（画面描述，可选 · 预留）",
+    desc: "OpenAI 兼容视觉模型；当前版本仅预留接口，不会发起真实调用。留空即不启用画面描述层",
+    fields: [
+      { key: "base_url", label: "Base URL", placeholder: "http://192.168.x.x:8000/v1" },
+      { key: "api_key", label: "API Key", placeholder: "留空则不修改" },
+      { key: "model", label: "模型", placeholder: "qwen-vl-flash / glm-4v" },
+    ],
+  },
+];
+
+// 视觉旁路开关档位（后端 settings API visual 组）
+const VISUAL_PIPELINE_OPTIONS = [
+  { value: "off", label: "关闭" },
+  { value: "auto", label: "自动（检测到无语音才启用）" },
+  { value: "always", label: "始终启用（调试）" },
 ];
 
 const TABS = [
@@ -144,9 +161,12 @@ export default function SettingsView() {
         setForm(d);
         snapshotRef.current = JSON.parse(JSON.stringify(d));
         // 服务模式初值：按已保存配置推导（provider+base_url 齐 → 远程档）
+        // 仅 asr / embedding 有「本地 / 远程」二选一语义（vlm 无本地档）
         const m = {};
         for (const g of GROUPS) {
-          if (g.key !== "llm") m[g.key] = !(d[g.key]?.provider && d[g.key]?.base_url);
+          if (g.key === "asr" || g.key === "embedding") {
+            m[g.key] = !(d[g.key]?.provider && d[g.key]?.base_url);
+          }
         }
         setLocalMode(m);
         setLoading(false);
@@ -201,12 +221,31 @@ export default function SettingsView() {
     return out;
   };
 
-  const onSave = async (groupsPayload) => {
+  // 视觉旁路保存：只发送「相对加载快照」发生变更的字段（与检索参数同思路）。
+  // pipeline 为枚举字符串，min_wpm / max_frames 转数字；空值视为未提供（不覆盖）。
+  const buildVisualPayload = () => {
+    const cur = form.visual || {};
+    const snap = snapshotRef.current?.visual || {};
+    const changed = {};
+    for (const k of ["pipeline", "min_wpm", "max_frames"]) {
+      const cv = cur[k];
+      if (cv === undefined || cv === null || cv === "") continue;
+      if (String(cv) === String(snap[k] ?? "")) continue;
+      changed[k] = k === "pipeline" ? cv : Number(cv);
+      if (Number.isNaN(changed[k])) delete changed[k];
+    }
+    return changed;
+  };
+
+  const onSave = async (groupsPayload, visualPayload) => {
     const retrieval = normalizeRetrieval();
     const payload = { ...(groupsPayload || {}), retrieval };
+    const hasVisual =
+      !!visualPayload && Object.keys(visualPayload).length > 0;
+    if (hasVisual) payload.visual = visualPayload;
     const hasGroup = Object.keys(groupsPayload || {}).length > 0;
     const hasRetrieval = Object.values(retrieval).some((v) => v !== null);
-    if (!hasGroup && !hasRetrieval) {
+    if (!hasGroup && !hasRetrieval && !hasVisual) {
       setMsg("没有需要保存的变更");
       return;
     }
@@ -222,6 +261,9 @@ export default function SettingsView() {
       for (const [gk, fields] of Object.entries(groupsPayload || {})) {
         merged[gk] = { ...(merged[gk] || {}), ...fields };
       }
+      if (hasVisual) {
+        merged.visual = { ...(merged.visual || {}), ...visualPayload };
+      }
       snapshotRef.current = merged;
       setMsg(
         `已保存并立即生效（${r.saved.length} 项）：${r.saved.join(", ")}`,
@@ -235,7 +277,7 @@ export default function SettingsView() {
 
   // 服务页保存：服务组（llm/asr/embedding）按快照对比发送变更 + 检索参数；
   // 本地降级组（local）不经此保存（由「本地模型」Tab 独立即时生效）。
-  const onSaveServices = () => onSave(buildServicePayload());
+  const onSaveServices = () => onSave(buildServicePayload(), buildVisualPayload());
 
   // ---- 「使用本地模型 / 远程服务」模式切换（#1：选定后确认再切换）----
 
@@ -428,7 +470,7 @@ export default function SettingsView() {
             {!loading && (
               <div className="settings-groups">
                 {GROUPS.map((g) => {
-                  const switchable = g.key !== "llm"; // asr / embedding 可切本地档
+                  const switchable = g.key === "asr" || g.key === "embedding";
                   const local = !!localMode[g.key];
                   return (
                     <div className="settings-group" key={g.key}>
@@ -515,6 +557,65 @@ export default function SettingsView() {
                     </div>
                   );
                 })}
+
+                <div className="settings-group">
+                  <div className="settings-group-head">
+                    <h3 className="sub-title">视觉旁路（无语音视频）</h3>
+                    <p className="muted small">
+                      纯音乐 MV / PPT 录屏 / 教程演示等「几乎没有对白」的视频：自动抽关键帧识别画面文字，
+                      并入转写、笔记与检索。保存后下一次处理任务即生效
+                    </p>
+                  </div>
+                  <div className="settings-fields">
+                    <label className="field">
+                      <span className="field-label">启用档位</span>
+                      <select
+                        className="input"
+                        value={form.visual?.pipeline ?? "auto"}
+                        onChange={(e) => setField("visual", "pipeline", e.target.value)}
+                      >
+                        {VISUAL_PIPELINE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="muted small">
+                        自动档仅在语音密度低于阈值时触发，正常口播视频不受影响；始终启用仅用于调试
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span className="field-label">无语音判定阈值（字/分钟）</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        max={600}
+                        value={form.visual?.min_wpm ?? ""}
+                        placeholder="默认 10"
+                        onChange={(e) => setField("visual", "min_wpm", e.target.value)}
+                      />
+                      <span className="muted small">
+                        转写字数 / 时长 低于该值即视为无语音视频（默认 10）
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span className="field-label">最大关键帧数</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        max={600}
+                        value={form.visual?.max_frames ?? ""}
+                        placeholder="默认 60"
+                        onChange={(e) => setField("visual", "max_frames", e.target.value)}
+                      />
+                      <span className="muted small">
+                        抽帧上限；越大画面文字覆盖越全，OCR 耗时也越长（默认 60）
+                      </span>
+                    </label>
+                  </div>
+                </div>
 
                 <div className="settings-group">
                   <div className="settings-group-head">

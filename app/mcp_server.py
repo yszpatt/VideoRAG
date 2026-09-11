@@ -101,7 +101,15 @@ async def _get_transcript(
         if end is not None:
             q = q.where(Segment.start_sec <= end)
         rows = (await s.execute(q)).scalars().all()
-    return [{"start_sec": g.start_sec, "end_sec": g.end_sec, "text": g.text} for g in rows]
+    return [
+        {
+            "start_sec": g.start_sec,
+            "end_sec": g.end_sec,
+            "text": g.text,
+            "source": g.source or "speech",
+        }
+        for g in rows
+    ]
 
 
 async def _submit(components: dict, url: str) -> dict:

@@ -252,6 +252,16 @@ function TranscriptBody({ videoId, url }) {
             >
               {fmtTs(s.start_sec)}
             </a>
+            {s.source === "ocr" && (
+              <span className="seg-src" title="来自画面文字识别（OCR）">
+                🖼
+              </span>
+            )}
+            {s.source === "vlm" && (
+              <span className="seg-src" title="来自画面内容描述（VLM）">
+                💬
+              </span>
+            )}
             <span className="seg-text">{s.text}</span>
           </li>
         ))}

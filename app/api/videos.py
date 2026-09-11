@@ -291,7 +291,12 @@ async def get_transcript(video_id: str, request: Request):
         ).scalars().all()
         return {
             "segments": [
-                {"start_sec": g.start_sec, "end_sec": g.end_sec, "text": g.text}
+                {
+                    "start_sec": g.start_sec,
+                    "end_sec": g.end_sec,
+                    "text": g.text,
+                    "source": g.source or "speech",
+                }
                 for g in segs
             ]
         }

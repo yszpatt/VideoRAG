@@ -111,8 +111,20 @@ def build_note_reduce_prompt(
     ]
 
 
+# 视觉旁路来源在笔记正文行内的标注（note_system 默认模板有对应说明）。
+# 注意：这是「送给 LLM 的文本」的标注，不改写 Segment.text 本身（DB/检索/前端保持干净）。
+_SRC_MARKERS = {"ocr": "[画面] ", "vlm": "[画面描述] "}
+
+
+def _src_marker(source: str | None) -> str:
+    return _SRC_MARKERS.get(source or "", "")
+
+
 def _text_with_timestamps(transcript: Transcript) -> str:
-    lines = [f"[{seg.start_sec:.0f}] {seg.text}" for seg in transcript.segments]
+    lines = [
+        f"[{seg.start_sec:.0f}] {_src_marker(seg.source)}{seg.text}"
+        for seg in transcript.segments
+    ]
     text = "\n".join(lines) or transcript.raw_text
     return text[:MAX_TRANSCRIPT_CHARS]
 

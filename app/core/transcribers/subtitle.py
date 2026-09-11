@@ -12,7 +12,7 @@ class SubtitleTranscriber:
             raise ValueError("subtitle transcriber requires subtitle media")
         raw = media.subtitle_text or ""
         segments = [
-            Segment(start_sec=s, end_sec=e, text=t)
+            Segment(start_sec=s, end_sec=e, text=t, source="subtitle")
             for s, e, t in media.meta.get("segments", [])
         ]
         return Transcript(segments=segments, raw_text=raw, source="subtitle")

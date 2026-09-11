@@ -63,10 +63,15 @@ def create_app(
 
     async def process_handler(payload: dict) -> None:
         c = components
+        s = c["settings"]
         await process_video(
             payload["video_id"], sf, c["fetchers"], c["transcribers"], c["llm"],
-            c["settings"].data_dir, embedder=c["embedder"], vector_store=c["vector_store"],
-            prompts=c["prompts"], cookie_dir=c["settings"].cookie_dir,
+            s.data_dir, embedder=c["embedder"], vector_store=c["vector_store"],
+            prompts=c["prompts"], cookie_dir=s.cookie_dir,
+            # E3 视觉旁路：每次任务现取最新设置（保存即生效）
+            visual_pipeline=s.visual_pipeline_effective,
+            visual_min_wpm=s.visual_min_wpm,
+            visual_max_frames=s.visual_max_frames,
         )
 
     q = queue or Queue(sf, handlers={"process": TaskHandler(process_handler)})

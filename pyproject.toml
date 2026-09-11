@@ -16,6 +16,11 @@ dependencies = [
     "lancedb>=0.30",
     "fastembed>=0.5",
     "mcp>=1.0,<2",
+    # E3 视觉旁路：画面文字识别（ONNX，模型随包内置，纯 CPU）
+    "rapidocr-onnxruntime>=1.3",
+    # 关键帧图像指纹去重（dHash）；uv.lock 中已作为 fastembed 传递依赖存在，
+    # 此处显式声明避免依赖漂移
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from app.core.fetchers.base import FetchedMedia
+
+logger = logging.getLogger(__name__)
 
 Runner = Callable[[Sequence[str]], object]
 
@@ -249,6 +252,45 @@ async def fetch_metadata(
             continue
         return _normalize_metadata(info)
     raise FetchMetadataError("no dump-json object in yt-dlp stdout")
+
+
+async def fetch_video(
+    url: str,
+    workdir: str,
+    cookie_dir: str | None = None,
+    timeout: float = 1800.0,
+    runner: Runner | None = None,
+) -> str | None:
+    """视觉旁路按需下载视频文件（E3），失败返回 None。
+
+    为什么不复用 `YtdlpFetcher.fetch`：fetcher 链降级顺序是字幕 → 音频 → 视频，
+    只要有音轨就返回音频，几乎永远拿不到视频文件。视觉抽帧需要真正的视频流，
+    因此这里单独调用 yt-dlp 下载 `bestvideo*+bestaudio`（与 `_try_video` 同参数）。
+
+    - 复用 `cookie_args_for()` 的平台 cookie 逻辑（抖音/小红书必需）；
+    - 写入调用方给定的**显式绝对目录**（不复用 fetch 链的空 workdir + os.chdir 约定）；
+    - 异常一律吞掉并记日志，由调用方保持「视觉失败不影响主流程」。
+    """
+    platform = detect_platform(url)
+    cookie_args = cookie_args_for(cookie_dir, platform)
+    args = [
+        "-f", "bestvideo*+bestaudio/best",
+        "--merge-output-format", "mp4",
+        *cookie_args,
+        "-o", str(Path(workdir) / "video.%(ext)s"),
+        url,
+    ]
+    exec_ = runner if runner is not None else (lambda a: run_ytdlp(a, timeout))
+    try:
+        await asyncio.to_thread(exec_, args)
+    except Exception as e:  # 下载失败/超时：视觉层跳过，不 fail 视频
+        logger.warning("visual video download failed for %s: %s", url, e)
+        return None
+    wd = Path(workdir)
+    if not wd.is_dir():
+        return None
+    video = next((p for p in sorted(wd.iterdir()) if p.suffix in VIDEO_EXTS), None)
+    return str(video) if video else None
 
 
 class YtdlpFetcher:

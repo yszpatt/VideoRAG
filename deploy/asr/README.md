@@ -48,7 +48,11 @@ docker compose --profile local-asr up -d
 - 模型真源 = `./videorag-data/models/asr`（videorag 写、asr 只读挂载 `/data:ro`）；
 - `restart: unless-stopped` + `/health` healthcheck；模型缺失时容器无法启动（打印指引后退出，
   避免静默挂起）——先在 videorag UI 下载模型再启 profile，或把模型预置到共享目录；
-- 端口/线程可经环境覆盖：`PORT`、`NUM_THREADS`、`MODEL_DIR`（默认 `/data/models/asr`）。
+- 端口/线程可经环境覆盖：`PORT`、`NUM_THREADS`、`MODEL_DIR`（默认 `/data/models/asr`）；
+- **运行用户**：镜像内以非 root 用户 `app` 运行（UID/GID 由构建参数 `APP_UID`/`APP_GID` 决定，
+  compose 从 `VIDEORAG_UID`/`VIDEORAG_GID` 注入，与主服务保持一致）。共享模型卷中的文件
+  需对该 UID 可读——从旧版（root 运行）升级时先一次性修复属主：
+  `sudo chown -R "$(id -u)":"$(id -g)" <数据目录>`。
 
 ## 手动验证（与 videorag 联调）
 

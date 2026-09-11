@@ -77,6 +77,8 @@ class Segment(TimestampMixin, Base):
     end_sec: Mapped[float] = mapped_column(Float)
     text: Mapped[str] = mapped_column(Text)
     speaker: Mapped[str | None] = mapped_column(default=None)  # 预留 diarization
+    # E3：来源（speech=语音|subtitle=字幕|ocr=画面文字|vlm=画面描述），老库由 db._ensure_columns 补齐
+    source: Mapped[str] = mapped_column(default="speech")
 
     video: Mapped[Video] = relationship(back_populates="segments", lazy="selectin")
 

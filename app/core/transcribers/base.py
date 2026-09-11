@@ -10,6 +10,8 @@ class Segment:
     end_sec: float
     text: str
     speaker: str | None = None
+    # 来源：speech=语音转写（默认）| subtitle=字幕 | ocr=画面文字（E3 视觉旁路）| vlm=画面描述
+    source: str = "speech"
 
 
 @dataclass

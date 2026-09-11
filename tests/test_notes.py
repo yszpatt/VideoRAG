@@ -142,6 +142,29 @@ def test_split_text_by_chars_respects_line_boundary():
     assert total_lines == 100
 
 
+def test_text_with_timestamps_marks_visual_sources():
+    """E3：画面来源段在笔记正文加 [画面]/[画面描述] 前缀，语音/字幕不加。"""
+    from app.core.notes import _text_with_timestamps
+
+    tr = Transcript(
+        segments=[
+            Segment(0, 1, "口播内容", source="speech"),
+            Segment(1, 2, "字幕内容", source="subtitle"),
+            Segment(2, 3, "PPT 上的文字", source="ocr"),
+            Segment(3, 4, "画面里有一个人", source="vlm"),
+        ],
+        raw_text="",
+        source="cloud_asr",
+    )
+    text = _text_with_timestamps(tr)
+    assert text == (
+        "[0] 口播内容\n"
+        "[1] 字幕内容\n"
+        "[2] [画面] PPT 上的文字\n"
+        "[3] [画面描述] 画面里有一个人"
+    )
+
+
 def test_render_markdown():
     note = NoteData(**SAMPLE_JSON)
     md = render_markdown(note, "测试视频")

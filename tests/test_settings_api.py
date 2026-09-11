@@ -5,13 +5,19 @@ async def test_get_settings_defaults(client):
     resp = await client.get("/api/settings")
     assert resp.status_code == 200
     d = resp.json()
-    assert set(d) == {"llm", "asr", "embedding", "retrieval", "local"}
+    assert set(d) == {"llm", "asr", "embedding", "vlm", "visual", "retrieval", "local"}
     assert d["llm"]["provider"] == "deepseek"
     assert d["llm"]["base_url"] == "https://api.deepseek.com"
     assert d["llm"]["model"] == "deepseek-v4-flash"
     assert d["llm"]["api_key"] == ""  # 未配置为空
     assert d["asr"]["provider"] == ""
     assert d["embedding"]["provider"] == "fastembed"
+    # 视觉旁路组默认值（E3）
+    assert d["visual"]["pipeline"] == "auto"
+    assert d["visual"]["min_wpm"] == 10
+    assert d["visual"]["max_frames"] == 60
+    assert d["vlm"]["base_url"] == ""
+    assert d["vlm"]["model"] == ""
     # 本地降级组默认值
     assert d["local"]["asr_fallback"] == "sensevoice"
     assert d["local"]["local_asr_base_url"] == ""
@@ -238,3 +244,70 @@ async def test_put_settings_clear_embedding_falls_back_local(client, tmp_path):
     e = c["embedder"]
     assert e._provider == "fastembed"
     assert e._model_name == "BAAI/bge-small-zh-v1.5"
+
+
+# ============ 视觉旁路（E3）配置组 ============
+
+
+async def test_put_settings_visual_persists_and_applies(client, tmp_path):
+    resp = await client.put(
+        "/api/settings",
+        json={"visual": {"pipeline": "always", "min_wpm": 20, "max_frames": 120}},
+    )
+    assert resp.status_code == 200
+    assert set(resp.json()["saved"]) == {
+        "VISUAL_PIPELINE", "VISUAL_MIN_WPM", "VISUAL_MAX_FRAMES",
+    }
+    from app.core.runtime_config import load_runtime_env
+
+    env = load_runtime_env(str(tmp_path))
+    assert env["VISUAL_PIPELINE"] == "always"
+    assert env["VISUAL_MIN_WPM"] == "20"
+    assert env["VISUAL_MAX_FRAMES"] == "120"
+    # 热生效（GET 回显 + 派生属性）
+    s = client._transport.app.state.components["settings"]
+    assert s.visual_pipeline_effective == "always"
+    assert s.visual_enabled is True
+    gd = (await client.get("/api/settings")).json()["visual"]
+    assert gd == {"pipeline": "always", "min_wpm": 20, "max_frames": 120}
+
+
+async def test_put_settings_visual_off_disables(client):
+    resp = await client.put("/api/settings", json={"visual": {"pipeline": "off"}})
+    assert resp.status_code == 200
+    s = client._transport.app.state.components["settings"]
+    assert s.visual_pipeline_effective == "off"
+    assert s.visual_enabled is False
+
+
+async def test_put_settings_visual_invalid_pipeline_400(client):
+    resp = await client.put("/api/settings", json={"visual": {"pipeline": "sometimes"}})
+    assert resp.status_code == 400
+    assert "off/auto/always" in resp.json()["detail"]
+
+
+async def test_put_settings_visual_out_of_range_400(client):
+    resp = await client.put("/api/settings", json={"visual": {"max_frames": 9999}})
+    assert resp.status_code == 400
+    assert "范围" in resp.json()["detail"]
+
+
+async def test_put_settings_vlm_persists_and_masks(client, tmp_path):
+    resp = await client.put(
+        "/api/settings",
+        json={"vlm": {
+            "base_url": "http://192.168.x.x:8000/v1",
+            "api_key": "sk-vlm-1234567890",
+            "model": "qwen-vl-flash",
+        }},
+    )
+    assert resp.status_code == 200
+    assert set(resp.json()["saved"]) == {"VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL"}
+    s = client._transport.app.state.components["settings"]
+    assert s.vlm_enabled is True
+    assert s.vlm_model == "qwen-vl-flash"
+    # GET 回读：api_key 脱敏
+    gd = (await client.get("/api/settings")).json()["vlm"]
+    assert gd["model"] == "qwen-vl-flash"
+    assert gd["api_key"] == "sk-v...7890"
+    assert "1234567890" not in gd["api_key"]

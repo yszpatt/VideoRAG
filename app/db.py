@@ -13,7 +13,7 @@ from app.config import Settings
 from app.models import Base
 
 # 与设计文档第 6 节目录结构一致
-SUBDIRS = ("db", "lancedb", "models", "cookies", "downloads", "audio", "transcripts", "notes", "thumbnails")
+SUBDIRS = ("db", "lancedb", "models", "cookies", "downloads", "audio", "transcripts", "notes", "thumbnails", "frames")
 
 # v2 轻量列迁移（设计文档 0.4a）：老库已有表缺 ORM 新列时补齐。
 # 表驱动而非 SQL 迁移文件——字段与 ORM 定义一一对应，缺失即补，幂等可重跑。
@@ -33,6 +33,10 @@ _REQUIRED_COLUMNS: dict[str, dict[str, str]] = {
         # 老库 chunk 镜像表补 kind（新库由 create_all 建全）。NOT NULL + 常量默认
         # 使 SQLite 允许直接 ADD COLUMN，存量行自动回填 content。
         "kind": "TEXT NOT NULL DEFAULT 'content'",
+    },
+    "segments": {
+        # E3：老库 segments 补来源列，存量行回填 speech（NOT NULL + 常量默认可 ADD COLUMN）
+        "source": "TEXT NOT NULL DEFAULT 'speech'",
     },
 }
 

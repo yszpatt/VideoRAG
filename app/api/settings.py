@@ -36,6 +36,10 @@ GROUPS = {
     "llm": ["LLM_PROVIDER", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"],
     "asr": ["CLOUD_ASR_PROVIDER", "CLOUD_ASR_BASE_URL", "CLOUD_ASR_MODEL", "CLOUD_ASR_KEY"],
     "embedding": ["EMBED_PROVIDER", "EMBED_MODEL", "EMBED_BASE_URL", "EMBED_API_KEY"],
+    # 视觉旁路画面描述层（VLM，OpenAI 兼容视觉模型）；留空 = 不启用
+    "vlm": ["VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL"],
+    # 视觉旁路（E3）：无语音视频的画面信息采集开关与阈值
+    "visual": ["VISUAL_PIPELINE", "VISUAL_MIN_WPM", "VISUAL_MAX_FRAMES"],
     # 本地降级（Local Fallback）：开关/端点/手动路径由 GET 回显；
     # 模型下载管理走 /api/models（见 app/core/local_models/manager.py）。
     "local": [
@@ -57,6 +61,12 @@ FIELD_DISPLAY = {
     "EMBED_MODEL": "model",
     "EMBED_BASE_URL": "base_url",
     "EMBED_API_KEY": "api_key",
+    "VLM_BASE_URL": "base_url",
+    "VLM_API_KEY": "api_key",
+    "VLM_MODEL": "model",
+    "VISUAL_PIPELINE": "pipeline",
+    "VISUAL_MIN_WPM": "min_wpm",
+    "VISUAL_MAX_FRAMES": "max_frames",
     "ASR_FALLBACK": "asr_fallback",
     "LOCAL_ASR_BASE_URL": "local_asr_base_url",
     "LOCAL_ASR_MODEL_DIR": "local_asr_model_dir",
@@ -140,6 +150,24 @@ class RetrievalConfig(BaseModel):
     neighbor_gap: float | None = None
 
 
+# 视觉旁路参数：env 键 → (前端字段名, 类型, 约束)
+# - str 类型：约束为允许取值元组
+# - int 类型：约束为 (下界, 上界)
+VISUAL_FIELDS = {
+    "VISUAL_PIPELINE": ("pipeline", str, ("off", "auto", "always")),
+    "VISUAL_MIN_WPM": ("min_wpm", int, (0, 600)),
+    "VISUAL_MAX_FRAMES": ("max_frames", int, (1, 600)),
+}
+
+
+class VisualConfig(BaseModel):
+    """视觉旁路配置（E3）。None = 不覆盖。"""
+
+    pipeline: str | None = None
+    min_wpm: int | None = None
+    max_frames: int | None = None
+
+
 class LocalConfig(BaseModel):
     """本地降级（Local Fallback）配置。
 
@@ -158,6 +186,8 @@ class SettingsUpdate(BaseModel):
     llm: ServiceConfig | None = None
     asr: ServiceConfig | None = None
     embedding: ServiceConfig | None = None
+    vlm: ServiceConfig | None = None
+    visual: VisualConfig | None = None
     retrieval: RetrievalConfig | None = None
     local: LocalConfig | None = None
 
@@ -169,8 +199,8 @@ async def update_settings(req: SettingsUpdate, request: Request):
     payload = req.model_dump()
 
     for group in GROUPS:
-        if group == "local":
-            continue  # 本地降级组独立处理（None/"" 语义见下）
+        if group in ("local", "visual"):
+            continue  # 本地降级 / 视觉旁路组独立处理（字段结构不同，见下）
         cfg = payload.get(group)
         if cfg is None:
             continue  # 组未提供 → 全部不覆盖
@@ -196,6 +226,27 @@ async def update_settings(req: SettingsUpdate, request: Request):
                     400, f"{key} 超出允许范围 [{lo}, {hi}]：{value}"
                 )
             overrides[key] = str(typ(value))
+
+    # 视觉旁路组：None=不覆盖；枚举校验 + 数值范围校验（越界报 400）
+    if req.visual is not None:
+        vc = req.visual.model_dump()
+        for key, (field, typ, bounds) in VISUAL_FIELDS.items():
+            value = vc.get(field)
+            if value is None:
+                continue
+            if typ is str:
+                if value not in bounds:
+                    raise HTTPException(
+                        400, f"{key} 必须为 {'/'.join(bounds)}：{value}"
+                    )
+                overrides[key] = value
+            else:
+                lo, hi = bounds
+                if not (lo <= value <= hi):
+                    raise HTTPException(
+                        400, f"{key} 超出允许范围 [{lo}, {hi}]：{value}"
+                    )
+                overrides[key] = str(typ(value))
 
     # 本地降级组：None=不覆盖；""=显式清空（回落默认）；其余写入
     if req.local is not None:
@@ -252,7 +303,7 @@ def _probe_candidates(kind: str, base: str) -> list[str]:
 
 
 class ProbeRequest(BaseModel):
-    kind: str = ""          # llm | asr | embedding
+    kind: str = ""          # llm | asr | embedding | vlm
     base_url: str = ""
     model: str | None = None
     api_key: str | None = None  # 掩码 **** / 空 → 用当前已保存 key
@@ -306,8 +357,8 @@ async def probe_service(req: ProbeRequest, request: Request):
     - 401/403：已连通但鉴权失败（检查 API Key）；其他 4xx/5xx：路径/地址不对。
     """
     kind = (req.kind or "").strip().lower()
-    if kind not in ("llm", "asr", "embedding"):
-        raise HTTPException(400, "kind 必须为 llm / asr / embedding")
+    if kind not in ("llm", "asr", "embedding", "vlm"):
+        raise HTTPException(400, "kind 必须为 llm / asr / embedding / vlm")
     base = (req.base_url or "").strip()
     if not base:
         raise HTTPException(400, "请先填写 Base URL 再测试连通性")
@@ -319,7 +370,8 @@ async def probe_service(req: ProbeRequest, request: Request):
     # 空 → 回落当前已保存的真实 key（绝不能把掩码当真实 key 发往第三方）。
     s = _get_settings(request)
     saved_key = {
-        "llm": s.llm_api_key, "asr": s.cloud_asr_key, "embedding": s.embed_api_key,
+        "llm": s.llm_api_key, "asr": s.cloud_asr_key,
+        "embedding": s.embed_api_key, "vlm": s.vlm_api_key,
     }[kind]
     key = (req.api_key or "").strip()
     if _is_mask_value(key):

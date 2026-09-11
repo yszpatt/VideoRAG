@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from sqlalchemy import delete, select
@@ -10,9 +11,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.embed.chunker import Chunk, chunk_segments
 from app.core.fetchers.base import FetchedMedia, Fetcher
-from app.core.fetchers.ytdlp import FetchError, fetch_metadata
+from app.core.fetchers.ytdlp import FetchError, fetch_metadata, fetch_video
 from app.core.notes import NoteData, generate_note, render_markdown
 from app.core.transcribers.base import Transcript, Transcriber
+from app.core.vision import is_speechless, merge_transcripts, run_visual_pipeline
 from app.models import Chunk as ORMChunk
 from app.models import Comment, Note, Segment, Video, new_id
 
@@ -76,12 +78,19 @@ async def process_video(
     vector_store=None,
     prompts=None,
     cookie_dir: str | None = None,
+    visual_pipeline: str = "off",
+    visual_min_wpm: int = 10,
+    visual_max_frames: int = 60,
 ) -> None:
-    """单个视频的完整摄入流程：metadata → fetch → transcribe → note → embed → done。
+    """单个视频的完整摄入流程：metadata → fetch → transcribe →（视觉旁路）→ note → embed → done。
 
     - metadata（E1）：抓取标题/简介/封面/热评，失败只记日志不 fail 视频；
       成功后标题/简介/热评注入笔记上下文（note_vars）；
-    - prompts（E2）：PromptRegistry，笔记生成走用户自定义提示词；None 用内置默认。
+    - prompts（E2）：PromptRegistry，笔记生成走用户自定义提示词；None 用内置默认；
+    - visual_pipeline（E3）：off/auto/always，默认 off。仅在命中无语音判定时
+      按需下载视频 → 抽帧 + OCR，视觉段并入转写；视觉层失败一律隔离。
+      默认 off 保证既有直接调用（含单元测试）行为不变，生产由 main.py 从
+      components["settings"] 现取传入。
     """
     async with session_factory() as s:
         video = await s.get(Video, video_id)
@@ -90,6 +99,7 @@ async def process_video(
         url = video.url
         title = video.title or video.url
         platform = video.platform
+        duration_sec = video.duration_sec
 
     media: FetchedMedia | None = None
     try:
@@ -102,6 +112,13 @@ async def process_video(
 
         await _save(session_factory, video_id, status="transcribing")
         transcript, _used_transcriber = await transcribe_with_fallback(media, transcribers)
+        # E3 视觉旁路：无语音视频补画面文字（失败隔离，不 fail 视频）
+        transcript = await _visual_bypass(
+            video_id, url, transcript, media,
+            data_dir=data_dir, cookie_dir=cookie_dir, duration_sec=duration_sec,
+            visual_pipeline=visual_pipeline, visual_min_wpm=visual_min_wpm,
+            visual_max_frames=visual_max_frames,
+        )
         await _store_segments(session_factory, video_id, transcript)
 
         await _save(session_factory, video_id, status="noting")
@@ -135,6 +152,61 @@ async def process_video(
                 os.remove(media.path)
             except OSError:
                 pass
+        # 清理视觉旁路临时目录（按需下载的视频 + 抽帧文件）
+        shutil.rmtree(Path(data_dir) / "frames" / video_id, ignore_errors=True)
+
+
+async def _visual_bypass(
+    video_id: str,
+    url: str,
+    transcript: Transcript,
+    media: FetchedMedia,
+    *,
+    data_dir: str,
+    cookie_dir: str | None,
+    duration_sec: float | None,
+    visual_pipeline: str,
+    visual_min_wpm: int,
+    visual_max_frames: int,
+    vlm=None,
+) -> Transcript:
+    """E3 视觉旁路：命中无语音判定时采集画面信息并合并进转写。
+
+    流程：判定 → 取视频文件（媒体本身是视频则直接用，否则按需单独下载）→
+    抽帧 + OCR（+ 预留 VLM 层）→ 视觉段并入转写。
+
+    失败隔离：任一步骤异常都只记日志并返回原转写，绝不让视频 fail。
+    """
+    mode = (visual_pipeline or "off").strip().lower()
+    if mode not in ("auto", "always"):
+        return transcript
+    if mode == "auto" and not is_speechless(
+        transcript.segments, duration_sec, visual_min_wpm
+    ):
+        return transcript
+
+    frame_dir = str(Path(data_dir) / "frames" / video_id)
+    try:
+        video_path = media.path if media.kind == "video" and media.path else None
+        if video_path is None:
+            # fetcher 链几乎总返回音频/字幕，这里按需单独下载视频（视觉抽帧必需）
+            video_path = await fetch_video(url, frame_dir, cookie_dir)
+        if not video_path:
+            logger.warning("visual bypass skipped for %s: no video file", video_id)
+            return transcript
+        visual_segs = await run_visual_pipeline(
+            video_path, frame_dir, max_frames=visual_max_frames, vlm=vlm
+        )
+        if not visual_segs:
+            logger.info("visual bypass produced no segments for %s", video_id)
+            return transcript
+        logger.info(
+            "visual bypass added %d segment(s) for %s", len(visual_segs), video_id
+        )
+        return merge_transcripts(transcript, visual_segs, duration_sec)
+    except Exception as e:  # 兜底隔离：视觉异常不影响转写/笔记/入库
+        logger.warning("visual bypass failed for %s: %s", video_id, e)
+        return transcript
 
 
 async def _save(session_factory, video_id, status=None, error=None):
@@ -227,6 +299,7 @@ async def _store_segments(session_factory, video_id, transcript: Transcript) -> 
                     end_sec=seg.end_sec,
                     text=seg.text,
                     speaker=seg.speaker,
+                    source=seg.source,
                 )
             )
         await s.commit()
@@ -276,6 +349,15 @@ def assert_model_compat(vector_store, embedder, vec: list[float]) -> None:
 EMBED_BATCH_SIZE = 64
 
 
+def _strip_src(rows: list[dict]) -> list[dict]:
+    """剥离入库行里的 src：来源只写 SQLite Chunk.meta，向量表 schema 保持不变。
+
+    LanceDB 行字段固定为 id/video_id/content/embedding/start_sec/end_sec/
+    title/platform/kind；新增列会导致老表 schema 不一致，故仅做 SQLite 侧扩展。
+    """
+    return [{k: v for k, v in r.items() if k != "src"} for r in rows]
+
+
 async def _embed_chunks(
     session_factory,
     video_id: str,
@@ -318,9 +400,11 @@ async def _embed_chunks(
                     "title": title,
                     "platform": platform,
                     "kind": "content",
+                    # E3：来源只落 SQLite Chunk.meta，向量表 schema 保持不变
+                    "src": c.src,
                 }
             )
-        await asyncio.to_thread(vector_store.add, rows)
+        await asyncio.to_thread(vector_store.add, _strip_src(rows))
         await _store_chunks(session_factory, video_id, rows)
     await asyncio.to_thread(vector_store.ensure_fts_index)
 
@@ -358,8 +442,9 @@ async def _embed_meta(
         "title": title,
         "platform": platform,
         "kind": "meta",
+        "src": "meta",
     }
-    await asyncio.to_thread(vector_store.add, [row])
+    await asyncio.to_thread(vector_store.add, _strip_src([row]))
     # 存量表若在 add 时发生 kind 迁移（表重建），FTS 索引会丢失，这里幂等重建；
     # 已有索引时该调用静默跳过。
     await asyncio.to_thread(vector_store.ensure_fts_index)
@@ -382,6 +467,7 @@ async def _store_chunks(session_factory, video_id: str, rows: list[dict]) -> Non
                         "title": r.get("title"),
                         "platform": r.get("platform"),
                         "kind": kind,
+                        "src": r.get("src") or ("meta" if kind == "meta" else "speech"),
                     },
                     lancedb_id=r["id"],
                 )
@@ -390,8 +476,8 @@ async def _store_chunks(session_factory, video_id: str, rows: list[dict]) -> Non
 
 
 # 启动清扫的临时媒体目录（相对 data_dir）。这些目录只放转写过程中的临时文件：
-# 下载的音频/视频、yt-dlp 中间产物、字幕暂存；正式数据在 notes/lancedb/db。
-_TEMP_MEDIA_DIRS = ("downloads", "audio", "transcripts")
+# 下载的音频/视频、yt-dlp 中间产物、字幕暂存、视觉旁路抽帧；正式数据在 notes/lancedb/db。
+_TEMP_MEDIA_DIRS = ("downloads", "audio", "transcripts", "frames")
 
 
 def sweep_temp_media(data_dir: str) -> int:

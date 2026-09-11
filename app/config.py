@@ -59,6 +59,19 @@ class Settings(BaseSettings):
     # 手动指定本地 SenseVoice 模型目录（含 model.int8.onnx + tokens.txt；空=用 models_dir 自动管理）
     local_asr_model_dir: str = ""
 
+    # ============ 视觉旁路（E3：无语音视频的画面信息采集）============
+    # off=关闭 / auto=检测到无语音才走 / always=强制（调试用）
+    visual_pipeline: str = "auto"
+    visual_min_wpm: int = 10      # 无语音判定阈值（字/分钟，低于即视为无语音）
+    visual_max_frames: int = 60   # 送 OCR/VLM 的最大关键帧数（先抽帧去重再均匀采样封顶）
+
+    # ============ VLM（画面描述，可选增强；OpenAI 兼容视觉模型）============
+    # 三件套留空 = 画面描述层不启用（仅本地 OCR 层工作）。
+    # 本版仅预留接口，不发起真实视觉调用（见 app/core/vision/vlm.py）。
+    vlm_base_url: str = ""
+    vlm_api_key: str = ""
+    vlm_model: str = ""
+
     # ============ MCP ============
     mcp_api_key: str = ""
 
@@ -190,6 +203,24 @@ class Settings(BaseSettings):
     def embed_model_dir_effective(self) -> str:
         """本地 embedding 模型目录：手动指定优先，否则 models_dir（fastembed HF 缓存根）。"""
         return self.local_embed_model_dir.rstrip("/") or self.models_dir
+
+    # ---- 视觉旁路 / VLM ----
+
+    @property
+    def visual_pipeline_effective(self) -> str:
+        """视觉旁路档位归一化：非法值回落 auto（仅接受 off/auto/always）。"""
+        value = (self.visual_pipeline or "").strip().lower()
+        return value if value in ("off", "auto", "always") else "auto"
+
+    @property
+    def visual_enabled(self) -> bool:
+        """视觉旁路是否可能启用（off 之外的所有档位）。"""
+        return self.visual_pipeline_effective != "off"
+
+    @property
+    def vlm_enabled(self) -> bool:
+        """画面描述层（VLM）是否已配置：base_url + model 齐全即可（本地服务可无 key）。"""
+        return bool(self.vlm_base_url.strip() and self.vlm_model.strip())
 
     def apply_runtime(self, overrides: dict[str, str]) -> "Settings":
         """应用在线修改的配置（$DATA_DIR/runtime.env），优先级最高。

@@ -16,6 +16,13 @@
 #   videorag 读写 /data；asr 只读共享 /data/models/asr。
 # 注意：本机如果已有裸机/旧目录数据，可用 docker-compose.override.yml
 # （已被 .gitignore 忽略）把 ./data 改挂到真实数据目录，勿改动本文件。
+#
+# 运行用户（重要）：容器以非 root 用户 app 运行，其 UID/GID 由构建参数对齐宿主用户
+# （VIDEORAG_UID / VIDEORAG_GID，默认 1000:1000；取值见 `id -u` / `id -g`）。
+# 这样 ./data 下文件属主与宿主一致，不会出现「容器写的文件裸机改不动」的权限冲突。
+#   改动 UID/GID 后需重建：docker compose up -d --build
+#   从旧版本（root 运行）升级且 ./data 已有 root 属主文件时，先一次性修复：
+#     sudo chown -R "$(id -u)":"$(id -g)" ./data
 # =============================================================================
 
 name: videorag
@@ -23,7 +30,12 @@ name: videorag
 services:
   # ---------------- 主服务（FastAPI + 前端静态资源） ----------------
   videorag:
-    build: .
+    build:
+      context: .
+      # 运行用户 UID/GID 与宿主对齐（见文件头说明）；改后需 --build 重建
+      args:
+        APP_UID: "${VIDEORAG_UID:-1000}"
+        APP_GID: "${VIDEORAG_GID:-1000}"
     image: videorag:latest
     container_name: videorag
     restart: unless-stopped
@@ -95,7 +107,12 @@ services:
   # 侧车只读加载。默认不启动：docker compose --profile local-asr up -d
   # 不暴露宿主端口，videorag 经容器网 http://asr:9991 访问（调试可 override 放开）。
   asr:
-    build: ./deploy/asr
+    build:
+      context: ./deploy/asr
+      # 与主服务保持同一 UID/GID，保证共享模型卷属主一致
+      args:
+        APP_UID: "${VIDEORAG_UID:-1000}"
+        APP_GID: "${VIDEORAG_GID:-1000}"
     image: videorag-asr:latest
     container_name: videorag-asr
     profiles: ["local-asr"]

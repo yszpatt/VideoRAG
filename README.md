@@ -19,6 +19,7 @@
 
 - **转写（本地默认）**：本地 SenseVoice 侧车（sherpa-onnx int8 ≈240MB，纯 CPU 可跑）；也可在设置中接入自定义 ASR 服务（需支持时间戳，见「本地 ASR」）
 - **结构化笔记**：云 LLM 生成摘要 / 章节（带时间戳）/ 要点 / 术语表，导出 markdown
+- **无语音视频画面采集（视觉旁路）**：纯音乐 MV / PPT 录屏 / 教程演示等「几乎没有对白」的视频，自动抽关键帧 + OCR 识别画面文字并入转写（转写页以 🖼 标记来源），笔记与检索同样可用；可在设置页在线开关与调参
 - **RAG 问答**：中文混合检索（向量 + ngram 全文）+ LLM 生成，答案附可点击时间戳引用
 - **Web UI**：提交链接、看进度、检索、读笔记，一步到位；提问页支持**多轮追问会话**（每轮问答保留可滚动回看，新提问自动滚动到可视区）
 - **MCP 外挂**：暴露为 Streamable HTTP，你的 Cline CLI / 其他 agent 可直接查询知识库
@@ -40,6 +41,10 @@ docker run -d --name videorag \
   videorag
 ```
 
+> 非 1000 UID 的宿主（群晖 NAS 常见 1026）：构建时传入自己的 UID/GID ——
+> `docker build --build-arg APP_UID=$(id -u) --build-arg APP_GID=$(id -g) -t videorag .`；
+> 否则 `./data` 会因属主不匹配报权限错误（可用 `sudo chown -R "$(id -u)":"$(id -g)" ./data` 修复）。
+
 > 环境变量太多？也可以把配置写进项目根目录 `.env`（模板：`.env.example`，`cp .env.example .env` 后修改），不传 `-e` 即可，详见「配置方式」。
 
 然后浏览器打开 `http://<nas-ip>:8080`。
@@ -60,6 +65,7 @@ docker compose up -d     # 3. 启动 → http://localhost:8080
 - **本地 ASR（可选）**：首次启动后在「设置 → 本地模型」下载 SenseVoice 模型，然后
   `docker compose --profile local-asr up -d` 启动 sherpa-onnx 侧车（与主服务共享 `./data`，只读加载模型）
 - **数据目录**：统一 `./data`（视频 / 向量库 / 笔记 / 模型 / runtime.env 全在里面，已被 .gitignore 忽略）
+- **运行用户**：容器以非 root 用户运行，UID/GID 经 `VIDEORAG_UID` / `VIDEORAG_GID` 与宿主对齐（默认 1000，取值见 `id -u` / `id -g`）——`./data` 下文件属主即宿主用户，Docker 与裸机可无缝切换；改后需 `docker compose up -d --build`
 - **本机已有数据**：用 `docker-compose.override.yml` 把 `./data` 改挂到真实目录即可（该文件已被 .gitignore 忽略，勿改动标准 compose）
 - **完整字段与默认值**：见下方「环境变量参考」与 `.env.example`
 
@@ -90,11 +96,16 @@ cp .env.example .env   # 按需修改
 | `CLOUD_ASR_BASE_URL` | - | 空 | 自定义 ASR 服务地址，如 `http://192.168.x.x:9991` |
 | `CLOUD_ASR_KEY` | - | 空 | 无鉴权可填任意非空串 |
 | `CLOUD_ASR_MODEL` | - | 空 | 可选，指定远程模型名（默认由服务决定） |
+| `VISUAL_PIPELINE` | - | `auto` | 视觉旁路档位：`off` 关闭 / `auto` 检测到无语音才启用 / `always` 强制（调试） |
+| `VISUAL_MIN_WPM` | - | `10` | 无语音判定阈值（字/分钟）：语音密度低于该值即视为无语音视频 |
+| `VISUAL_MAX_FRAMES` | - | `60` | 送 OCR/VLM 的最大关键帧数（场景帧 + 每 30s 兜底帧，去重后封顶） |
+| `VLM_BASE_URL` / `VLM_API_KEY` / `VLM_MODEL` | - | 空 | 画面描述层（VLM，OpenAI 兼容视觉模型）；**当前版本仅预留接口，不发起真实调用**，留空即不启用 |
 | `MCP_API_KEY` | - | 空 | 设置后 MCP 端点需 Bearer 鉴权（compose 模板默认 `change-me`，建议修改） |
 | `DATA_DIR` | - | `/data` | 数据根目录（容器内） |
 | `COOKIE_DIR` | - | `/data/cookies` | 平台 cookie 目录 |
 | `PORT` | - | `8080` | |
 | `MAX_CONCURRENT_TASKS` | - | `1` | CPU 密集任务并发（NAS 建议 1） |
+| `VIDEORAG_UID` / `VIDEORAG_GID` | - | `1000` | 容器运行用户的 UID/GID：与宿主对齐后，`./data` 不再出现 root 属主文件（Docker 与裸机可共用同一份数据）；取值见 `id -u` / `id -g`，改后需 `docker compose up -d --build` |
 
 ## 在线配置（Web 界面）
 
@@ -237,6 +248,20 @@ docker compose up -d --build          # 主服务重建（启用本地 ASR 加 -
 ```
 
 也可手动 `docker run` 方式：`docker build -t videorag . && docker rm -f videorag` 后按原命令重新启动。
+
+> **从「以 root 运行」的旧版本升级（重要，一次性）**
+>
+> 容器现已改为以宿主用户身份运行（UID/GID 由 `VIDEORAG_UID` / `VIDEORAG_GID` 决定）。
+> 若数据目录里已有旧版容器写入的 **root 属主**文件，新版本会写不进去，表现为入库报
+> `Permission denied` / `LanceError(IO): ... (os error 13)`。升级前先修复属主：
+>
+> ```bash
+> # 数据目录按实际挂载路径替换（标准 compose 为 ./data；本机 override 为 ./.data）
+> sudo chown -R "$(id -u)":"$(id -g)" ./data
+> ```
+>
+> 若宿主 UID 不是 1000，同时确认 `.env` 里的 `VIDEORAG_UID` / `VIDEORAG_GID` 已按
+> `id -u` / `id -g` 填写，再执行 `docker compose up -d --build` 重建。
 
 ## 常见问题（FAQ）
 
