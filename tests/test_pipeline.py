@@ -338,3 +338,121 @@ def test_sweep_temp_media_clears_leftovers_only(tmp_path):
 
     # 幂等：再跑一次无文件可删
     assert sweep_temp_media(str(tmp_path)) == 0
+
+
+# ============ 已下载媒体归档（新增，默认关闭） ============
+
+
+async def _prepare_archive_case(tmp_path, video_id, title="T"):
+    from app.config import Settings
+    from app.db import init_db, make_session_factory
+    from app.models import Video
+
+    settings = Settings(_env_file=None, data_dir=str(tmp_path))
+    engine, factory = make_session_factory(settings)
+    await init_db(engine, settings)
+    async with factory() as s:
+        s.add(Video(id=video_id, platform="youtube", url="https://youtu.be/x", title=title))
+        await s.commit()
+    return engine, factory
+
+
+def _audio_fixtures(path):
+    fetchers = [FakeFetcher(name="audio", result=FetchedMedia(kind="audio", path=str(path)))]
+    transcribers = [
+        FakeTranscriber(
+            name="whisper",
+            result=Transcript(
+                segments=[Segment(0, 1, "hi")], raw_text="hi", source="whisper"
+            ),
+        )
+    ]
+    return fetchers, transcribers
+
+
+async def test_process_video_archives_downloaded_audio(tmp_path, monkeypatch):
+    """配置归档目录：音频留存副本（按元数据标题命名），临时文件仍被清理。"""
+    from app.jobs import pipeline as pl
+    from app.models import Video
+
+    engine, factory = await _prepare_archive_case(tmp_path, "vid-arch")
+    # 避免真实网络调用，同时验证归档文件名使用元数据标题（而非库内旧标题）
+    async def fake_meta(url, cookie_dir=None, **kw):
+        return {"title": "元数据标题"}
+
+    monkeypatch.setattr(pl, "fetch_metadata", fake_meta)
+
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"audio-bytes")
+    archive_dir = tmp_path / "archive"
+    fetchers, transcribers = _audio_fixtures(audio)
+
+    await process_video(
+        "vid-arch", factory, fetchers, transcribers, FakeLLM(), str(tmp_path),
+        media_save_dir=str(archive_dir),
+    )
+
+    archived = list(archive_dir.glob("*"))
+    assert len(archived) == 1
+    assert archived[0].name == "元数据标题-vid-arch.mp3"
+    assert archived[0].read_bytes() == b"audio-bytes"
+    assert not audio.exists()  # 归档是复制：临时文件仍按原逻辑清理
+
+    async with factory() as s:
+        assert (await s.get(Video, "vid-arch")).status == "done"
+    await engine.dispose()
+
+
+async def test_process_video_archives_on_failure_path(tmp_path, monkeypatch):
+    """转写失败路径同样归档（已完整下载的文件不因后续失败而丢掉）。"""
+    from app.jobs import pipeline as pl
+    from app.models import Video
+
+    engine, factory = await _prepare_archive_case(tmp_path, "vid-fail")
+
+    async def fake_meta(url, cookie_dir=None, **kw):
+        return {"title": "失败标题"}
+
+    monkeypatch.setattr(pl, "fetch_metadata", fake_meta)
+
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"partial")
+    archive_dir = tmp_path / "archive"
+    fetchers = [FakeFetcher(name="audio", result=FetchedMedia(kind="audio", path=str(audio)))]
+    transcribers = [FakeTranscriber(name="whisper", raise_=RuntimeError("asr down"))]
+
+    await process_video(
+        "vid-fail", factory, fetchers, transcribers, FakeLLM(), str(tmp_path),
+        media_save_dir=str(archive_dir),
+    )
+
+    async with factory() as s:
+        assert (await s.get(Video, "vid-fail")).status == "failed"
+    assert (archive_dir / "失败标题-vid-fail.mp3").read_bytes() == b"partial"
+    assert not audio.exists()
+    await engine.dispose()
+
+
+async def test_process_video_no_archive_when_dir_unset(tmp_path, monkeypatch):
+    """默认（未配置归档目录）：不产生任何归档目录，行为与旧版一致。"""
+    from app.jobs import pipeline as pl
+    from app.models import Video
+
+    engine, factory = await _prepare_archive_case(tmp_path, "vid-noarch")
+
+    async def fake_meta(url, cookie_dir=None, **kw):
+        return {"title": "T"}
+
+    monkeypatch.setattr(pl, "fetch_metadata", fake_meta)
+
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"x")
+    fetchers, transcribers = _audio_fixtures(audio)
+
+    await process_video("vid-noarch", factory, fetchers, transcribers, FakeLLM(), str(tmp_path))
+
+    assert not audio.exists()  # 临时文件照旧清理
+    assert not (tmp_path / "archive").exists()  # 未配置 → 不创建任何归档目录
+    async with factory() as s:
+        assert (await s.get(Video, "vid-noarch")).status == "done"
+    await engine.dispose()

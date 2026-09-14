@@ -187,6 +187,32 @@ cookie，按文件名放入数据目录 `cookies/`：
 
 未放 cookie 时，提交抖音/小红书链接会立即返回明确错误提示。
 
+## 已下载媒体归档（可选，默认关闭）
+
+转写过程中下载到本地的媒体默认会在用完后删除。若希望留存原始素材，可启用归档：
+
+- **保存内容**：实际下载到的媒体——无字幕但有语音的视频保存 **mp3**，需要视频流的场景保存 **mp4**；
+  纯字幕场景不产生文件（**不额外下载、不增加带宽与耗时**）
+- **文件名**：`<视频标题>-<video_id>.<扩展名>`（标题已清洗非法字符并截断 80 字符，video_id 保底唯一）
+- **跳过已存在**：重复导入 / 任务重试不会重复占盘
+- **失败隔离**：目录不可写、复制失败只记日志，不影响转写/笔记/入库
+
+启用步骤：
+
+```bash
+# 1. 准备宿主目录并保证属主与容器一致
+mkdir -p ./downloads && chown "$(id -u)":"$(id -g)" ./downloads
+# 2. 在 .env 中填入容器内归档路径（compose 已把 ./downloads 映射到 /media）
+echo 'MEDIA_SAVE_DIR=/media' >> .env
+# 3. 重建容器使 env 生效
+docker compose up -d
+```
+
+- 宿主目录默认 `./downloads`，可用 `MEDIA_SAVE_DIR_HOST` 指向 NAS 共享或大容量盘
+- 归档目录**不要**设在 `/data/downloads`、`/data/audio`、`/data/transcripts`、`/data/frames` 内：
+  这些是临时目录，启动时会被清扫（程序检测到此配置会拒绝归档并告警）
+- 仅支持通过 `.env` / docker-compose 配置（设置页只读回显当前生效目录）；清空 `MEDIA_SAVE_DIR` 即回到旧行为
+
 ## MCP（agent 外挂）
 
 MCP 端点：`http://<nas-ip>:8080/mcp`（Streamable HTTP，无状态）。
@@ -278,7 +304,7 @@ B站对数据中心 IP 有风控。把浏览器 cookie 导出为 `/data/cookies/
 模型对静音/无语音片段会"脑补"字幕式文案（幻觉），属模型正常行为，不影响真实人声识别。测试素材请用带人声的音频。
 
 **Q：数据存在哪里？**
-全部在挂载卷 `/data` 下：SQLite（元数据/任务）、LanceDB（向量）、notes（markdown）、models（模型缓存）。删除容器不丢数据，备份该目录即可。
+全部在挂载卷 `/data` 下：SQLite（元数据/任务）、LanceDB（向量）、notes（markdown）、models（模型缓存）。删除容器不丢数据，备份该目录即可。唯一例外是**已下载媒体归档**（可选功能，`MEDIA_SAVE_DIR`）：默认在容器内 `/media`，对应宿主 `./downloads`，需单独备份。
 
 ## 本地开发
 
@@ -313,6 +339,9 @@ python scripts/dev_demo.py                 # http://localhost:8080，预置 3 �
 ├── models/       # whisper + embedding 模型缓存
 └── cookies/      # 平台 cookie
 ```
+
+> 已下载媒体归档（可选，见「已下载媒体归档」）默认落在容器内 `/media`（映射自宿主
+> `./downloads`），**不在** `/data` 卷内；若启用该功能，备份原始素材需单独备份该宿主目录。
 
 ## 致谢
 

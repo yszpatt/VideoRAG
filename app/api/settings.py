@@ -106,6 +106,13 @@ async def get_settings(request: Request):
     out["retrieval"] = {
         field: getattr(s, key.lower()) for key, (field, *_ ) in RETRIEVAL_FIELDS.items()
     }
+    # 存储/归档（新增）：**只读**回显，刻意不加入 GROUPS —— 因此 PUT 不遍历该段、
+    # SettingsUpdate 也未声明该字段（pydantic v2 默认 extra=ignore），PUT 天然忽略。
+    # 修改只能走 .env / docker-compose 并重启容器（目录涉及卷挂载，不宜热改）。
+    out["storage"] = {
+        "media_save_dir": s.media_save_dir,
+        "media_archive_enabled": bool((s.media_save_dir or "").strip()),
+    }
     return out
 
 

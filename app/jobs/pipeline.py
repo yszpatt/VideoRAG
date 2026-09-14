@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.embed.chunker import Chunk, chunk_segments
 from app.core.fetchers.base import FetchedMedia, Fetcher
 from app.core.fetchers.ytdlp import FetchError, fetch_metadata, fetch_video
+from app.core.media_archive import archive_media
 from app.core.notes import NoteData, generate_note, render_markdown
 from app.core.transcribers.base import Transcript, Transcriber
 from app.core.vision import is_speechless, merge_transcripts, run_visual_pipeline
@@ -78,6 +79,7 @@ async def process_video(
     vector_store=None,
     prompts=None,
     cookie_dir: str | None = None,
+    media_save_dir: str | None = None,
     visual_pipeline: str = "off",
     visual_min_wpm: int = 10,
     visual_max_frames: int = 60,
@@ -86,6 +88,8 @@ async def process_video(
 
     - metadata（E1）：抓取标题/简介/封面/热评，失败只记日志不 fail 视频；
       成功后标题/简介/热评注入笔记上下文（note_vars）；
+    - media_save_dir（新增）：已下载媒体归档目录，空 = 不保存（默认，行为不变）。
+      配置后在临时文件被清理前复制一份副本到该目录（按标题命名 + video_id 保底）；
     - prompts（E2）：PromptRegistry，笔记生成走用户自定义提示词；None 用内置默认；
     - visual_pipeline（E3）：off/auto/always，默认 off。仅在命中无语音判定时
       按需下载视频 → 抽帧 + OCR，视觉段并入转写；视觉层失败一律隔离。
@@ -118,6 +122,7 @@ async def process_video(
             data_dir=data_dir, cookie_dir=cookie_dir, duration_sec=duration_sec,
             visual_pipeline=visual_pipeline, visual_min_wpm=visual_min_wpm,
             visual_max_frames=visual_max_frames,
+            media_save_dir=media_save_dir, title=title,
         )
         await _store_segments(session_factory, video_id, transcript)
 
@@ -148,6 +153,12 @@ async def process_video(
         # 失败时把下载的 m4a/webm 留在 data/audio、data/downloads 里积盘。
         # 仅在媒体已下载（media 非 None）且非字幕时删除。
         if media and media.kind in ("audio", "video") and media.path:
+            # 归档已下载媒体（新增，默认关闭）：必须在删除临时文件之前执行，
+            # 使成功与失败路径下「已完整下载」的文件都能留存。archive_media
+            # 内部已兜底隔离异常，绝不阻断下面的清理与主流程。
+            archive_media(
+                media.path, media_save_dir, video_id, title, data_dir=data_dir
+            )
             try:
                 os.remove(media.path)
             except OSError:
@@ -168,12 +179,14 @@ async def _visual_bypass(
     visual_pipeline: str,
     visual_min_wpm: int,
     visual_max_frames: int,
+    media_save_dir: str | None = None,
+    title: str | None = None,
     vlm=None,
 ) -> Transcript:
     """E3 视觉旁路：命中无语音判定时采集画面信息并合并进转写。
 
     流程：判定 → 取视频文件（媒体本身是视频则直接用，否则按需单独下载）→
-    抽帧 + OCR（+ 预留 VLM 层）→ 视觉段并入转写。
+    归档按需下载的视频（新增，可选）→ 抽帧 + OCR（+ 预留 VLM 层）→ 视觉段并入转写。
 
     失败隔离：任一步骤异常都只记日志并返回原转写，绝不让视频 fail。
     """
@@ -188,12 +201,19 @@ async def _visual_bypass(
     frame_dir = str(Path(data_dir) / "frames" / video_id)
     try:
         video_path = media.path if media.kind == "video" and media.path else None
-        if video_path is None:
+        downloaded_here = video_path is None
+        if downloaded_here:
             # fetcher 链几乎总返回音频/字幕，这里按需单独下载视频（视觉抽帧必需）
             video_path = await fetch_video(url, frame_dir, cookie_dir)
         if not video_path:
             logger.warning("visual bypass skipped for %s: no video file", video_id)
             return transcript
+        if downloaded_here:
+            # 归档旁路按需下载的视频（新增，默认关闭）：media 本身是视频时已由
+            # 主管道 finally 归档，这里只处理「另行下载」的情形，避免重复归档。
+            archive_media(
+                video_path, media_save_dir, video_id, title, data_dir=data_dir
+            )
         visual_segs = await run_visual_pipeline(
             video_path, frame_dir, max_frames=visual_max_frames, vlm=vlm
         )

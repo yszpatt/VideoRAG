@@ -45,6 +45,12 @@ services:
       # 数据目录：视频/向量库/笔记/模型/运行时配置均持久化于此
       # 本机有真实数据时用 override 改挂（勿直接改本文件）
       - ./data:/data
+      # 已下载媒体归档（可选，默认不启用）：转写用过的音频/视频留存副本在此。
+      # 只有 .env 里 MEDIA_SAVE_DIR 非空（建议 /media）才真正归档；
+      # 宿主目录默认 ./downloads，可用 MEDIA_SAVE_DIR_HOST 指向 NAS 共享/大容量盘。
+      # 注意：宿主目录须与 VIDEORAG_UID/GID 属主一致（否则容器写不进）：
+      #   mkdir -p ./downloads && chown "$(id -u)":"$(id -g)" ./downloads
+      - ${MEDIA_SAVE_DIR_HOST:-./downloads}:/media
     environment:
       # ============ LLM（OpenAI 兼容；provider 仅作标识，base_url+model 决定实际调用）============
       LLM_PROVIDER: "${LLM_PROVIDER:-deepseek}"
@@ -75,6 +81,9 @@ services:
       # ============ 其他 ============
       MCP_API_KEY: "${MCP_API_KEY:-change-me}"         # MCP 鉴权（建议修改）
       # COOKIE_DIR: "/data/cookies"                    # 可选：抖音/小红书 cookie 目录
+      # 已下载媒体归档目录（可选）：留空/不设 = 不保存（默认）；填 /media 即启用。
+      # 容器内 /media 由上方 volumes 映射到宿主 MEDIA_SAVE_DIR_HOST（默认 ./downloads）。
+      MEDIA_SAVE_DIR: "${MEDIA_SAVE_DIR:-}"
     # ---- 资源约束（NAS 单容器场景建议保留） ----
     # 纯 CPU + 模型常驻（bge-small ≈100MB / SenseVoice ≈240MB）后，转写 / 笔记 /
     # embedding 会叠加峰值；不限内存时一旦 OOM 会拖垮整台 NAS。限制后超限由内核

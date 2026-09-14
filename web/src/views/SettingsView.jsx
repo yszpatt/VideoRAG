@@ -683,6 +683,39 @@ export default function SettingsView() {
                     </button>
                   </div>
                 </div>
+
+                {/* 已下载媒体归档（只读）：仅回显后端 GET 的 storage 段，
+                    不参与 buildServicePayload 快照差异，故本区不可编辑、无保存按钮 */}
+                <div className="settings-group">
+                  <div className="settings-group-head">
+                    <h3 className="sub-title">已下载媒体归档</h3>
+                    <p className="muted small">
+                      转写用过的音频 / 视频可留存一份副本（音频场景 MP3、视频场景 MP4；
+                      纯字幕场景不产生文件），文件名按标题命名并以 video_id 保底。
+                      本项只读：需在 .env / docker-compose 中配置 MEDIA_SAVE_DIR 后重启容器生效
+                    </p>
+                  </div>
+                  <div className="settings-fields">
+                    <div className="field">
+                      <span className="field-label">归档目录</span>
+                      <input
+                        className="input"
+                        type="text"
+                        readOnly
+                        value={
+                          form.storage?.media_archive_enabled
+                            ? form.storage.media_save_dir
+                            : ""
+                        }
+                        placeholder="未启用（默认不保存已下载媒体）"
+                      />
+                      <span className="muted small">
+                        容器内建议 /media（compose 已将其映射到宿主 MEDIA_SAVE_DIR_HOST，
+                        默认 ./downloads）
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
           </>

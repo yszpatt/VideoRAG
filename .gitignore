@@ -6,6 +6,7 @@ __pycache__/
 .env
 /data/
 /videorag-data/
+/downloads/
 dist/
 web/node_modules/
 web/dist/

@@ -14,6 +14,7 @@ from app.core.fetchers.ytdlp import YtdlpFetcher
 from app.core.factory import build_embedder, build_llm, build_transcribers
 from app.core.local_models.api import router as models_router
 from app.core.local_models.manager import ModelManager
+from app.core.media_archive import ensure_archive_dir
 from app.core.prompts import PromptRegistry
 from app.core.queue import Queue, TaskHandler, start_workers
 from app.core.runtime_config import load_runtime_env
@@ -68,6 +69,8 @@ def create_app(
             payload["video_id"], sf, c["fetchers"], c["transcribers"], c["llm"],
             s.data_dir, embedder=c["embedder"], vector_store=c["vector_store"],
             prompts=c["prompts"], cookie_dir=s.cookie_dir,
+            # 已下载媒体归档目录（新增）：每次任务现取最新设置（env 注入，重启生效）
+            media_save_dir=s.media_save_dir,
             # E3 视觉旁路：每次任务现取最新设置（保存即生效）
             visual_pipeline=s.visual_pipeline_effective,
             visual_min_wpm=s.visual_min_wpm,
@@ -112,6 +115,19 @@ def create_app(
                 print(f"[startup] swept {swept} stale temp media file(s)")
         except Exception as e:  # 清扫失败不应阻断启动
             print(f"[startup] temp media sweep skipped: {e}")
+        # 归档目录启动校验（新增，可选能力）：提前暴露「卷没挂 / 属主不对」，
+        # 避免第一条视频归档失败时才发现；未配置或不可用仅告警，不阻断启动。
+        if settings.media_save_dir:
+            try:
+                ok = await asyncio.to_thread(
+                    ensure_archive_dir, settings.media_save_dir, settings.data_dir
+                )
+                print(
+                    f"[startup] media archive dir {settings.media_save_dir}: "
+                    f"{'ready' if ok else 'unavailable (see warning above)'}"
+                )
+            except Exception as e:  # 校验异常不应阻断启动
+                print(f"[startup] media archive check skipped: {e}")
         worker = asyncio.create_task(start_workers(q, settings.max_concurrent_tasks))
         try:
             async with mcp_session_manager.run():  # MCP session 管理器随应用生命周期启停

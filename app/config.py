@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # ============ 目录与运行 ============
     data_dir: str = "/data"
     cookie_dir: str = "/data/cookies"
+    # 已下载媒体归档目录（新增）：空 = 不保存（默认，行为与旧版完全一致）；
+    # 填容器内绝对路径即开启，把转写用过的音频/视频留存一份副本供用户取用。
+    # 仅经环境变量 / docker-compose 配置（设置页只读回显），修改后需重启容器生效。
+    media_save_dir: str = ""
     port: int = 8080
     max_concurrent_tasks: int = 1
 

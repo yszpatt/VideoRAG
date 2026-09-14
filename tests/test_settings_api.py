@@ -5,7 +5,9 @@ async def test_get_settings_defaults(client):
     resp = await client.get("/api/settings")
     assert resp.status_code == 200
     d = resp.json()
-    assert set(d) == {"llm", "asr", "embedding", "vlm", "visual", "retrieval", "local"}
+    assert set(d) == {
+        "llm", "asr", "embedding", "vlm", "visual", "retrieval", "local", "storage",
+    }
     assert d["llm"]["provider"] == "deepseek"
     assert d["llm"]["base_url"] == "https://api.deepseek.com"
     assert d["llm"]["model"] == "deepseek-v4-flash"
@@ -311,3 +313,41 @@ async def test_put_settings_vlm_persists_and_masks(client, tmp_path):
     assert gd["model"] == "qwen-vl-flash"
     assert gd["api_key"] == "sk-v...7890"
     assert "1234567890" not in gd["api_key"]
+
+
+# ============ 已下载媒体归档（只读 storage 段） ============
+
+
+async def test_get_settings_includes_readonly_storage_default(client):
+    """storage 段只读：默认未启用（media_save_dir 为空）。"""
+    d = (await client.get("/api/settings")).json()
+    assert d["storage"] == {"media_save_dir": "", "media_archive_enabled": False}
+
+
+async def test_get_settings_storage_enabled(tmp_path):
+    """配置 MEDIA_SAVE_DIR 后 GET 回显启用状态（仍需重启容器生效）。"""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(_env_file=None, data_dir=str(tmp_path), media_save_dir="/media")
+    app = create_app(settings=settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        d = (await c.get("/api/settings")).json()
+        assert d["storage"] == {"media_save_dir": "/media", "media_archive_enabled": True}
+
+
+async def test_put_settings_ignores_readonly_storage(client):
+    """PUT 既不需要、也不接受 storage：携带该字段不报错，且不会写入 runtime.env。"""
+    resp = await client.put(
+        "/api/settings",
+        json={"storage": {"media_save_dir": "/media"}, "retrieval": {"vector_k": 30}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["saved"] == ["RETRIEVAL_VECTOR_K"]  # storage 未被持久化
+    d = (await client.get("/api/settings")).json()
+    assert d["storage"]["media_save_dir"] == ""
+    assert d["retrieval"]["vector_k"] == 30
