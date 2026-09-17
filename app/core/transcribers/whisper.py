@@ -29,7 +29,17 @@ class WhisperTranscriber:
 
     def _get_model(self):
         if self._model is None:
-            from faster_whisper import WhisperModel
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as e:
+                # 桌面包刻意不带 faster-whisper（省约 122MB，见 packaging/videorag.spec），
+                # 这里给可读指引，而不是让用户面对一句 ModuleNotFoundError。
+                raise RuntimeError(
+                    "本地 faster-whisper 档不可用：当前环境未安装 faster-whisper。"
+                    "Windows 桌面包默认不含该依赖（本地转写走进程内 SenseVoice）；"
+                    "请改用 SenseVoice 档（ASR_FALLBACK=sensevoice，桌面默认），"
+                    "或使用 Docker 部署以获得 whisper 保留档。"
+                ) from e
 
             self._model = WhisperModel(
                 self._model_size,

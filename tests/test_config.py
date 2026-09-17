@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -7,7 +8,16 @@ from app.config import Settings
 
 def test_defaults():
     s = Settings(_env_file=None)
-    assert s.data_dir == "/data"
+    # 数据目录默认值按平台决定：容器内 /data；Windows 裸机/桌面包用
+    # %LOCALAPPDATA%\videoRAG（/data 在 Windows 上会落到当前盘根目录）。
+    # Docker 侧由 compose 注入 DATA_DIR=/data，因此容器行为不受影响。
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        assert s.data_dir == str(Path(base) / "videoRAG")
+        assert s.cookie_dir == f"{s.data_dir}/cookies"
+    else:
+        assert s.data_dir == "/data"
+        assert s.cookie_dir == "/data/cookies"
     # LLM（OpenAI 兼容，默认 DeepSeek）
     assert s.llm_provider == "deepseek"
     assert s.llm_base_url == "https://api.deepseek.com"
@@ -23,7 +33,7 @@ def test_defaults():
     assert s.whisper_model == "large-v3"
     assert s.mcp_api_key == ""
     assert s.max_concurrent_tasks == 1
-    assert s.port == 8080
+    assert s.port == 8566
 
 
 def test_llm_env_override_openai_compatible(monkeypatch):

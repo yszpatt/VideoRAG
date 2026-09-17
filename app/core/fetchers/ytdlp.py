@@ -120,8 +120,58 @@ def _parse_srt(content: str) -> list[tuple[float, float, str]]:
     return out
 
 
+def _run_ytdlp_inproc(args: Sequence[str]) -> subprocess.CompletedProcess:
+    """在**同进程**内调用 yt-dlp，用重定向捕获输出。
+
+    为什么打包后必须这样做：windowed 形态（``console=False``）的 exe 没有可用的
+    stdout 句柄，``subprocess.run([sys.executable, ...], capture_output=True)`` 什么都
+    拿不到，而抓取链路依赖 stdout/stderr 解析结果（字幕是否落盘、失败原因）。
+    顺带还省掉了「每次抓取重启一个 PyInstaller exe」的秒级启动开销。
+
+    代价：subprocess 的 ``timeout`` 无法套用（进程内没法强杀），改由 yt-dlp 自身的
+    socket 超时与重试参数兜底——调用方传的 timeout 在此分支下仅作记录。
+    """
+    import contextlib
+    import io
+
+    import yt_dlp
+
+    out, err = io.StringIO(), io.StringIO()
+    saved = (sys.argv, sys.stdout, sys.stderr)
+    # windowed 形态下 stdout/stderr 可能是 None，而 yt-dlp 会向它们写日志
+    sys.stdout, sys.stderr = out, err
+    # 关键：yt-dlp 的 main(argv) 期望**不含程序名**的参数列表
+    # （内部直接走 argparse.parse_args(argv)）。曾把 ["yt-dlp", *args] 传进去，
+    # 结果那个多出来的 "yt-dlp" 被当成第二个 URL，报
+    # 「You've asked yt-dlp to download the URL "yt-dlp"」——
+    # 表现为元数据采集静默失败（meta_source=none）；而 --version 这类提前退出的
+    # 路径不受影响，所以自检用 --version 也发现不了。
+    # 注意 sys.argv 仍需保持含程序名的完整形式，yt-dlp 内部有读它的逻辑。
+    sys.argv = ["yt-dlp", *args]
+    code = 0
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = int(yt_dlp.main(list(args)) or 0)
+    except SystemExit as e:  # yt-dlp 内部可能直接 sys.exit
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except Exception as e:  # noqa: BLE001  任何异常都转成非 0 退出码，交给上层降级
+        err.write(f"\n{type(e).__name__}: {e}\n")
+        logger.exception("in-process yt-dlp failed")
+        code = 1
+    finally:
+        sys.argv, sys.stdout, sys.stderr = saved
+    return subprocess.CompletedProcess(args, code, out.getvalue(), err.getvalue())
+
+
 def run_ytdlp(args: Sequence[str], timeout: float = 600) -> subprocess.CompletedProcess:
-    # 用当前解释器调 -m yt_dlp，避免依赖 PATH 中的 yt-dlp 命令
+    """调用 yt-dlp。
+
+    - 源码 / 裸机：``<python> -m yt_dlp <args>`` 子进程（不依赖 PATH 里的 yt-dlp 命令，
+      且抓取崩溃不会影响主服务）
+    - 打包运行：同进程调用（见 ``_run_ytdlp_inproc`` 的原因说明）
+    """
+    if getattr(sys, "frozen", False):
+        return _run_ytdlp_inproc(args)
     return subprocess.run(
         [sys.executable, "-m", "yt_dlp", *args],
         capture_output=True,

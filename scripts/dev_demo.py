@@ -1,6 +1,6 @@
 """本地演示服务：预置演示数据 + fake AI 组件，供浏览器走查 UI。
 
-用法：python scripts/dev_demo.py   （访问 http://localhost:8080）
+用法：python scripts/dev_demo.py   （访问 http://localhost:8566）
 """
 import asyncio
 import os
@@ -252,7 +252,7 @@ async def main():
 
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8080"))
+    port = int(os.environ.get("PORT", "8566"))
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
     await uvicorn.Server(config).serve()
 

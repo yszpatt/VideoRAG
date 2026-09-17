@@ -11,6 +11,8 @@ import HistoryView from "./views/HistoryView.jsx";
 import LibraryView from "./views/LibraryView.jsx";
 import SettingsView from "./views/SettingsView.jsx";
 import ImportVideoDialog from "./components/ImportVideoDialog.jsx";
+// 品牌标识：由 packaging/make_logo.py 生成（渐变底 + 播放三角 + 波形条）
+import logo from "./assets/logo.svg";
 
 // 主页 = 提问；导入视频改为弹窗（主页 / 视频收藏均可唤起）
 const NAV = [
@@ -102,7 +104,7 @@ function Sidebar({ view, onNav, counts, themeLabel, onCycleTheme }) {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-mark">vR</span>
+        <img className="brand-mark" src={logo} alt="videoRAG" />
         <div className="brand-text">
           <strong>videoRAG</strong>
           <span>视频 → 笔记 → 知识库</span>

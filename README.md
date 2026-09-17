@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packaging/logo/videorag-256.png" alt="videoRAG logo" width="120" />
+</p>
+
 # videoRAG
 
 把 B站 / YouTube /  任意直链的视频转成结构化笔记，落入 RAG 知识库，
@@ -71,6 +75,62 @@ docker compose up -d     # 3. 启动 → http://localhost:8080
 
 不拷贝 `.env` 直接 `docker compose up -d` 也能启动，但 LLM 无 key 只能做转写/检索（见 FAQ）。
 
+## Windows 桌面应用（免安装包）
+
+除 Docker 外，也提供 Windows 原生应用（Release 附件 `videoRAG-<版本>-windows-x64.zip`）：
+解压后双击 `videorag.exe`，**直接出现应用窗口**——不弹命令行、不经过浏览器，
+也无需安装 Python / Docker / ffmpeg。
+
+|  | Docker | Windows 桌面包 |
+|---|---|---|
+| 适用场景 | NAS / 家用服务器 / VPS | 个人 Windows 电脑 |
+| 界面 | 浏览器访问 `:8080` | 原生窗口（Edge WebView2） |
+| 运行形态 | 主服务 + 本地 ASR 侧车（两个容器） | 单进程（SenseVoice 进程内推理） |
+| 数据目录 | 挂载卷 `/data` | `%LOCALAPPDATA%\videoRAG` |
+| 数据目录结构 | `db/ lancedb/ notes/ models/ cookies/` | **完全一致**，可互相迁移 |
+
+包内有两个可执行文件，按用途分开：
+
+| 文件 | 用途 |
+|---|---|
+| `videorag.exe` | **窗口形态**（默认双击这个）：原生窗口，无控制台黑框 |
+| `videorag-cli.exe` | 控制台形态：命令行排障、`--self-test` 自检、`--headless` 当本地服务 |
+
+```bat
+videorag.exe                                  :: 原生窗口（默认端口 8566，被占自动顺延）
+videorag.exe --browser                        :: 改用系统浏览器打开
+videorag.exe --headless                       :: 只起服务不开界面（当服务器用）
+videorag-cli.exe --headless --port 9000       :: 指定端口当服务器
+videorag-cli.exe --data-dir D:\vr             :: 指定数据目录
+videorag-cli.exe --self-test                  :: 启动 → 自检 → 退出（排查用）
+videorag-cli.exe --help
+```
+
+- **日志**：窗口形态没有控制台，日志落在 `<数据目录>\logs\videorag.log`
+  （默认 `%LOCALAPPDATA%\videoRAG\logs\videorag.log`）；启动失败会弹窗并指向该文件
+- **便携模式**：设环境变量 `VIDEORAG_PORTABLE=1`，数据落在 exe 同级 `./data`，整个目录可拷进 U 盘
+- **首次使用**：在「设置」页（`Alt+5`）填 LLM API Key；在「本地模型」页下载 SenseVoice（≈240MB）
+  与 Embedding（≈190MB）模型
+- **包内已含 ffmpeg**（Windows 静态构建，GPL 授权，由构建脚本获取而非提交仓库）
+- **系统要求**：Windows 10 1803+ / Windows 11。原生窗口依赖 **WebView2 Runtime**
+  （Win11 与多数 Win10 已自带）与 **.NET 6+**（pythonnet 桥接所需）；任一缺失时会自动回落到
+  系统浏览器打开，并在日志中说明原因，功能不受影响
+- **不要与 Docker 同时打开同一个数据目录**：SQLite / LanceDB 是单实例文件库，
+  双进程并发读写有损坏风险；迁移时请先停掉一侧
+
+从源码自行构建：
+
+```powershell
+pwsh -File packaging/build-windows.ps1     # 前端 → 依赖 → ffmpeg → PyInstaller → 冒烟 → zip
+```
+
+产物：`dist/videoRAG/`（目录形态，可直接运行）与 `dist/videoRAG-<版本>-windows-x64.zip`。
+
+> CI：`.github/workflows/build-windows.yml`（打 `v*` tag 自动发布 Release）。
+> 另有 `.github/workflows/verify-docker.yml` 守卫容器行为——它会在容器内断言
+> 「默认数据目录仍是 `/data`、默认 ASR 后端仍是侧车 HTTP、转写链未变」，
+> 确保桌面形态的改动不会悄悄影响 Docker 运行方式。
+
 ## 配置方式
 
 配置项可通过**环境变量**或项目根目录的 **`.env` 文件**提供（环境变量优先，`.env` 其次，最后是默认值）。`.env` 已加入 `.gitignore`，模板见 [`.env.example`](.env.example)：
@@ -96,6 +156,7 @@ cp .env.example .env   # 按需修改
 | `CLOUD_ASR_BASE_URL` | - | 空 | 自定义 ASR 服务地址，如 `http://192.168.x.x:9991` |
 | `CLOUD_ASR_KEY` | - | 空 | 无鉴权可填任意非空串 |
 | `CLOUD_ASR_MODEL` | - | 空 | 可选，指定远程模型名（默认由服务决定） |
+| `ASR_LOCAL_BACKEND` | - | `http` | 本地 SenseVoice 运行形态：`http` = 调用本地 OpenAI 兼容端点（Docker 侧车 / 裸机手工起服务，**默认即此**）；`inproc` = 进程内加载 sherpa-onnx（Windows 桌面包用，需安装 `desktop` extra）。非法值回落 `http` |
 | `VISUAL_PIPELINE` | - | `auto` | 视觉旁路档位：`off` 关闭 / `auto` 检测到无语音才启用 / `always` 强制（调试） |
 | `VISUAL_MIN_WPM` | - | `10` | 无语音判定阈值（字/分钟）：语音密度低于该值即视为无语音视频 |
 | `VISUAL_MAX_FRAMES` | - | `60` | 送 OCR/VLM 的最大关键帧数（场景帧 + 每 30s 兜底帧，去重后封顶） |

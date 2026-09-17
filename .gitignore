@@ -26,3 +26,11 @@ deploy/compose-backups/
 
 # 本地生成物（笔记导出、UI 参考）
 outputs/
+
+# ---- Windows 桌面打包 ----
+# uv 缓存：本机 %LOCALAPPDATA%\uv\cache 不可写时改用项目内缓存（UV_CACHE_DIR）
+/.uv-cache/
+# PyInstaller 中间产物（产物目录 dist/ 已在上面忽略）
+build/
+# 构建时下载的 ffmpeg 等外部二进制（体积大且带 GPL，不入库，由 packaging/vendor-ffmpeg.ps1 获取）
+packaging/vendor/

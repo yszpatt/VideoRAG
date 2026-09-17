@@ -21,12 +21,24 @@ dependencies = [
     # 关键帧图像指纹去重（dHash）；uv.lock 中已作为 fastembed 传递依赖存在，
     # 此处显式声明避免依赖漂移
     "pillow>=10",
+    # 进程内 SenseVoice 的分块/分句（app/core/transcribers/sensevoice_segments.py）
+    # 直接使用 numpy；uv.lock 中已作为 fastembed 传递依赖存在，显式声明避免依赖漂移
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+]
+# Windows 桌面包专用（Docker 镜像不装，保持主镜像轻量）：
+# - sherpa-onnx：进程内 SenseVoice 推理（ASR_LOCAL_BACKEND=inproc）
+# - pywebview：原生窗口（Windows 走 Edge WebView2 后端，经 pythonnet 做 CLR 桥）
+# - pyinstaller：打包为本地应用
+desktop = [
+    "sherpa-onnx>=1.13",
+    "pywebview>=5.0",
+    "pyinstaller>=6.0",
 ]
 
 [tool.pytest.ini_options]

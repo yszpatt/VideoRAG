@@ -1,0 +1,133 @@
+name: build-windows
+
+# 打包 Windows 桌面包并发布 Release。
+# 与 Docker 链路完全独立：Docker 用户继续 `docker compose up -d --build`，互不影响。
+#
+# 手动触发（workflow_dispatch）用于验证构建链路；打 v* tag 时额外创建 Release。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 创建 Release 需要
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          # 与 Dockerfile 的基础镜像保持一致，避免两形态依赖解析出现差异
+          python-version: "3.11"
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 创建虚拟环境并安装依赖（含 desktop extra）
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          # dev：单元测试；desktop：sherpa-onnx（进程内 ASR）+ pyinstaller
+          .venv\Scripts\python.exe -m pip install -e ".[dev,desktop]"
+
+      - name: 单元测试
+        shell: pwsh
+        run: .venv\Scripts\python.exe -m pytest -q
+
+      - name: 构建前端
+        shell: pwsh
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
+      - name: 获取 ffmpeg
+        shell: pwsh
+        run: pwsh -File packaging/vendor-ffmpeg.ps1
+
+      - name: PyInstaller 打包
+        shell: pwsh
+        run: |
+          .venv\Scripts\python.exe -m PyInstaller packaging/videorag.spec `
+            --noconfirm --distpath dist --workpath build
+
+      - name: 放置 ffmpeg 到产物目录
+        shell: pwsh
+        run: |
+          $dst = "dist\videoRAG\vendor\ffmpeg"
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
+          Copy-Item "packaging\vendor\ffmpeg\*.exe" $dst -Force
+          Get-ChildItem $dst | Select-Object Name, Length
+
+      - name: 冒烟测试（打包产物自检）
+        shell: pwsh
+        run: |
+          # 必须用控制台版：窗口版 console=False，stdout 不可用，检查结果打不出来。
+          # 自检覆盖 ffmpeg / yt-dlp / sherpa-onnx / WebView2 后端 / health / api / 前端 / MCP，
+          # 这几项对应历史上真实翻车过的环节（抓取全失败、ASR 不可用、窗口起不来）。
+          dist\videoRAG\videorag-cli.exe --self-test `
+            --data-dir "$env:TEMP\vr-smoke" --open-timeout 180
+
+      - name: 读取版本号
+        id: version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path pyproject.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+                  Select-Object -First 1
+          if (-not $line) { throw "无法从 pyproject.toml 解析版本号" }
+          $v = $line.Matches.Groups[1].Value
+          Write-Host "版本：$v"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: 打包 zip
+        shell: pwsh
+        run: |
+          $zip = "dist\videoRAG-${{ steps.version.outputs.version }}-windows-x64.zip"
+          Compress-Archive -Path "dist\videoRAG\*" -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "产物：$zip ($mb MB)"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: videoRAG-windows-x64
+          path: |
+            dist/videoRAG-*-windows-x64.zip
+          retention-days: 30
+
+      - name: 创建 Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/videoRAG-*-windows-x64.zip
+          generate_release_notes: true
+          body: |
+            ## videoRAG Windows 桌面包
+
+            **免安装**：解压后双击 `videorag.exe`，直接打开应用窗口——无需安装 Python / Docker / ffmpeg。
+
+            包内两个可执行文件，按用途分开：
+
+            - `videorag.exe` —— 窗口形态（默认双击这个），原生窗口、无命令行黑框
+            - `videorag-cli.exe` —— 控制台形态：命令行排障、`--self-test` 自检、`--headless` 当本地服务
+
+            其他要点：
+
+            - 数据目录：`%LOCALAPPDATA%\videoRAG`（可用 `--data-dir` 改；便携模式见下）
+            - 便携模式：设环境变量 `VIDEORAG_PORTABLE=1`，数据落在 exe 同级 `./data`，可整包拷走
+            - 日志：`%LOCALAPPDATA%\videoRAG\logs\videorag.log`（窗口形态没有控制台）
+            - 系统要求：Windows 10 1803+ / Windows 11。原生窗口依赖 WebView2 Runtime 与 .NET 6+；
+              任一缺失会自动回落到系统浏览器打开，功能不受影响
+            - 首次使用：在「设置」页配置 LLM API Key，并在「本地模型」下载 ASR / Embedding 模型
+            - 本包内含 ffmpeg（GPL 授权，见包内说明）
+            - Docker 用户请走 `docker compose up -d --build`，两条链路互不影响

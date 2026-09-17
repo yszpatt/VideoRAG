@@ -1,0 +1,147 @@
+name: verify-docker
+
+# Docker 形态回归校验：确保 Windows 桌面化的改动**不会改变容器运行行为**。
+#
+# 这是本次「双分发形态」改造的安全网。新增的 desktop 相关代码（进程内 ASR、
+# 平台化数据目录、运行时引导）都只在桌面入口生效，但仅靠代码审查容易漏，
+# 因此把关键约定固化成断言：
+#
+#   1. 镜像仍能构建（含前端构建 + 非 root 用户）
+#   2. 容器默认数据目录仍是 /data、cookie 仍是 /data/cookies
+#   3. 未设 ASR_LOCAL_BACKEND 时，转写链仍是 CloudASR → 本地端点（侧车形态）
+#   4. compose 注入 LOCAL_ASR_BASE_URL 时端点解析为容器网地址
+#   5. 服务能起、/health 通、MCP 工具列表可取
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "web/**"
+      - "deploy/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+      - ".github/workflows/verify-docker.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "web/**"
+      - "deploy/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建主镜像
+        run: docker build -t videorag:ci .
+
+      - name: 构建本地 ASR 侧车镜像
+        run: docker build -t videorag-asr:ci ./deploy/asr
+
+      - name: 容器默认配置断言（数据目录 / ASR 后端档位）
+        run: |
+          docker run --rm videorag:ci python -c '
+          from app.config import Settings
+          from app.core.factory import build_transcribers
+
+          # 1) 默认数据目录必须是容器路径语义（桌面化改动引入了平台分支，
+          #    这里确认 POSIX 下没有跑偏）
+          s = Settings(_env_file=None)
+          assert s.data_dir == "/data", f"data_dir 变了: {s.data_dir}"
+          assert s.cookie_dir == "/data/cookies", f"cookie_dir 变了: {s.cookie_dir}"
+
+          # 2) 默认 ASR 后端必须是 http（调用侧车），不是进程内
+          assert s.asr_local_backend == "http", s.asr_local_backend
+          assert s.asr_local_backend_effective == "http", s.asr_local_backend_effective
+
+          # 3) 转写链与历史一致：Subtitle + CloudASR(本地端点)
+          names = [t.name for t in build_transcribers(s)]
+          assert names == ["subtitle", "cloud_asr"], f"转写链变了: {names}"
+
+          print("OK 默认配置:", s.data_dir, s.cookie_dir, s.asr_local_backend_effective, names)
+          '
+
+      - name: compose 注入配置断言（容器网端点）
+        run: |
+          docker run --rm \
+            -e DATA_DIR=/data \
+            -e LOCAL_ASR_BASE_URL=http://asr:9991 \
+            -e MCP_API_KEY=change-me \
+            videorag:ci python -c '
+          from app.config import Settings
+          from app.core.factory import build_transcribers
+
+          s = Settings(_env_file=None)
+          assert s.data_dir == "/data"
+          assert s.cookie_dir == "/data/cookies"
+          assert s.asr_mode == "local"
+          assert s.asr_local_endpoint == "http://asr:9991", s.asr_local_endpoint
+
+          chain = build_transcribers(s)
+          assert [t.name for t in chain] == ["subtitle", "cloud_asr"]
+          assert chain[-1]._base == "http://asr:9991"
+          assert chain[-1]._provider == "local-sensevoice"
+
+          print("OK compose 注入:", s.asr_local_endpoint, chain[-1]._provider)
+          '
+
+      - name: 进程内 ASR 开关不影响 docker extra 之外的依赖
+        run: |
+          # sherpa-onnx 只装在 desktop extra，主镜像不应包含它
+          # （否则镜像会无谓变大，且模糊了「侧车/AI 进程」的职责边界）
+          docker run --rm videorag:ci python -c '
+          import importlib.util as u
+          assert u.find_spec("sherpa_onnx") is None, "主镜像不该装 sherpa-onnx"
+          # 但桌面形态的转写器模块必须可导入（sherpa-onnx 是延迟导入）
+          import app.core.transcribers.sensevoice as sv
+          assert hasattr(sv, "SenseVoiceTranscriber")
+          print("OK 主镜像保持轻量，且 sensevoice 模块可导入")
+          '
+
+      - name: 启动服务并探活
+        run: |
+          mkdir -p ci-data
+          docker run -d --name videorag-ci \
+            -p 8080:8080 \
+            -v "$PWD/ci-data:/data" \
+            -e DATA_DIR=/data \
+            -e MCP_API_KEY=ci-key \
+            videorag:ci
+
+          echo "等待服务就绪…"
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo "就绪（第 ${i} 次尝试）"; break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/health
+
+      - name: MCP 端点探针
+        run: |
+          curl -fsS -X POST http://127.0.0.1:8080/mcp \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ci-key" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            | tee /tmp/mcp.json
+          grep -q search_knowledge_base /tmp/mcp.json
+
+      - name: 失败时输出容器日志
+        if: failure()
+        run: docker logs videorag-ci || true
+
+      - name: 清理
+        if: always()
+        run: |
+          docker rm -f videorag-ci || true
+          rm -rf ci-data

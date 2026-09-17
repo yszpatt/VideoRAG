@@ -1,4 +1,29 @@
+import os
+from pathlib import Path
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 路径尾部需要裁掉的分隔符（正反斜杠都裁：Windows 用户可能填 C:\vr\ 这种写法）
+_TRAILING_SEPS = "/\\"
+
+
+def _default_data_dir() -> str:
+    """数据根目录默认值：按平台给合理落点。
+
+    - 容器内（POSIX）沿用 ``/data``——Docker 侧由 compose 显式注入 ``DATA_DIR=/data``，
+      因此**容器行为与本改动无关**；
+    - Windows 裸机 / 桌面包用 ``%LOCALAPPDATA%\\videoRAG``：``/data`` 在 Windows 上会被
+      解析到当前盘根目录（``C:\\data``），既不符合 Windows 习惯、也可能无写权限。
+
+    注意用 ``default_factory`` 而非模块级常量：环境变量（``DATA_DIR``）每次实例化时
+    重新读取，避免「import 时固化」。显式传入 ``DATA_DIR`` 时环境变量优先，本函数不执行。
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        return str(Path(base) / "videoRAG")
+    return "/data"
+
 
 
 class Settings(BaseSettings):
@@ -58,6 +83,13 @@ class Settings(BaseSettings):
     local_asr_base_url: str = ""
     # 手动指定本地 SenseVoice 模型目录（含 model.int8.onnx + tokens.txt；空=用 models_dir 自动管理）
     local_asr_model_dir: str = ""
+    # 本地 SenseVoice 的**运行形态**：
+    #   http   = 调用本地容器/进程内的 OpenAI 兼容端点（Docker 默认，行为与历史版本一致）
+    #   inproc = 进程内直接加载 sherpa-onnx（Windows 桌面包用，省掉第二个进程与端口）
+    # 非法值一律回落 http，保证「不设置 = 老行为」。
+    asr_local_backend: str = "http"
+    # 仅 inproc 形态生效：sherpa-onnx 解码线程数（对应侧车的 NUM_THREADS，默认 4）
+    local_asr_threads: int = 4
 
     # ============ 视觉旁路（E3：无语音视频的画面信息采集）============
     # off=关闭 / auto=检测到无语音才走 / always=强制（调试用）
@@ -79,13 +111,19 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
 
     # ============ 目录与运行 ============
-    data_dir: str = "/data"
-    cookie_dir: str = "/data/cookies"
+    # 默认值按平台决定（容器 /data；Windows %LOCALAPPDATA%\videoRAG），见 _default_data_dir
+    data_dir: str = Field(default_factory=_default_data_dir)
+    # cookie 目录：**空串 = 跟随 data_dir**（由下方 validator 派生为 <data_dir>/cookies）。
+    # 用派生而非独立默认值，是为了让「改 data_dir 时 cookie 目录自动跟着走」；
+    # 容器内 data_dir 由 compose 注入 /data，派生结果仍是 /data/cookies，行为与历史一致。
+    cookie_dir: str = ""
     # 已下载媒体归档目录（新增）：空 = 不保存（默认，行为与旧版完全一致）；
     # 填容器内绝对路径即开启，把转写用过的音频/视频留存一份副本供用户取用。
     # 仅经环境变量 / docker-compose 配置（设置页只读回显），修改后需重启容器生效。
     media_save_dir: str = ""
-    port: int = 8080
+    # 裸机 / 桌面形态的默认端口（8566：避开最易冲突的 8080）。
+    # 容器内端口由 Dockerfile CMD 与 compose 端口映射显式决定，与此字段无关。
+    port: int = 8566
     max_concurrent_tasks: int = 1
 
     # E5 历史记录：每类（ask/search）保留条数上限，超限环形淘汰最旧
@@ -101,6 +139,19 @@ class Settings(BaseSettings):
     retrieval_per_video_cap: int = 3     # 单视频最多占的结果位数（0 = 不限）
     retrieval_min_sim: float = 0.0       # 向量路最低余弦相似度门槛（0 = 关闭；建议 0.3）
     retrieval_neighbor_gap: float = 2.0  # 相邻切片合并窗口（秒）；0 = 关闭
+
+    @model_validator(mode="after")
+    def _derive_cookie_dir(self) -> "Settings":
+        """cookie_dir 为空时跟随 data_dir（保持「一个数据根」的单一真相源）。
+
+        显式配置 ``COOKIE_DIR``（环境变量 / runtime.env）时不覆盖它。
+        分隔符统一用 ``/``：Windows 亦接受正斜杠，且能让容器与裸机得到同一个字符串。
+        """
+        if not self.cookie_dir:
+            # rstrip 的字符集含反斜杠，不能直接内联进 f-string 表达式（3.11 语法限制）
+            base = self.data_dir.rstrip(_TRAILING_SEPS)
+            self.cookie_dir = f"{base}/cookies"
+        return self
 
     @property
     def db_path(self) -> str:
@@ -197,6 +248,12 @@ class Settings(BaseSettings):
     def asr_local_endpoint(self) -> str:
         """本地 SenseVoice OpenAI 兼容端点：显式配置优先，空则回退 127.0.0.1:9991。"""
         return (self.local_asr_base_url or "").strip().rstrip("/") or "http://127.0.0.1:9991"
+
+    @property
+    def asr_local_backend_effective(self) -> str:
+        """本地 SenseVoice 运行形态归一化：非法值回落 http（即 Docker 的历史行为）。"""
+        value = (self.asr_local_backend or "").strip().lower()
+        return value if value in ("http", "inproc") else "http"
 
     @property
     def asr_model_dir_effective(self) -> str:

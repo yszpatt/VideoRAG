@@ -159,22 +159,20 @@ textarea {
   padding: 0 6px;
 }
 
-/* 品牌标记：渐变实心 + 柔和光晕 */
+/* 品牌标记：logo 图形（渐变底 + 播放三角 + 波形条）
+   图形由 packaging/make_logo.py 生成，正方形比例与圆角自带，这里只管排布与光晕 */
 .brand-mark {
   width: 32px;
   height: 32px;
   flex: none;
+  display: block;
   border-radius: 10px;
-  background-image: var(--grad);
-  background-color: #6366f1;
-  color: #fff;
-  display: grid;
-  place-items: center;
-  font-weight: 700;
-  font-size: 12.5px;
-  letter-spacing: 0.2px;
-  border: none;
   box-shadow: var(--grad-shadow);
+}
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .brand-text {

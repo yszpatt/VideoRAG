@@ -170,3 +170,87 @@ def test_asr_mode_falls_back_local_when_remote_cleared():
         cloud_asr_provider="sensevoice", cloud_asr_base_url="",  # 只留 provider
     )
     assert s2.asr_mode == "local"  # base_url 空即不算远程
+
+
+# ---------- 本地 SenseVoice 运行形态（ASR_LOCAL_BACKEND）----------
+#
+# 背景：Docker 形态下本地 SenseVoice 是独立侧车容器（HTTP 127.0.0.1:9991/asr:9991）；
+# Windows 桌面包改为进程内 sherpa-onnx（不起第二个进程）。默认值必须保持
+# 「不设置 = 老行为」，否则会影响 Docker 运行模式。
+
+def test_asr_local_backend_defaults_to_http():
+    """默认 http —— 即 Docker 现状，桌面包必须显式设置才改变行为。"""
+    s = Settings(_env_file=None, data_dir="/tmp/t")
+    assert s.asr_local_backend == "http"
+    assert s.asr_local_backend_effective == "http"
+
+
+def test_asr_local_backend_inproc_selected():
+    s = Settings(_env_file=None, data_dir="/tmp/t", asr_local_backend="inproc")
+    assert s.asr_local_backend_effective == "inproc"
+
+
+def test_asr_local_backend_normalizes_and_rejects_unknown():
+    """大小写/空白归一化；非法值一律回落 http（保持向后兼容，不因拼错而崩）。"""
+    assert Settings(_env_file=None, data_dir="/tmp/t",
+                    asr_local_backend=" INPROC ").asr_local_backend_effective == "inproc"
+    for bad in ("", "sidecar", "local", "http+inproc"):
+        assert Settings(_env_file=None, data_dir="/tmp/t",
+                        asr_local_backend=bad).asr_local_backend_effective == "http"
+
+
+def test_build_transcribers_http_backend_unchanged():
+    """http 档（默认）：仍是 CloudASR 指向本地端点——Docker 行为零变化。"""
+    s = Settings(_env_file=None, data_dir="/tmp/t", asr_local_backend="http")
+    chain = build_transcribers(s)
+    assert [c.name for c in chain] == ["subtitle", "cloud_asr"]
+    assert chain[-1]._provider == "local-sensevoice"
+
+
+def test_build_transcribers_inproc_backend():
+    """inproc 档：进程内 SenseVoice，模型目录取 asr_model_dir_effective。"""
+    s = Settings(_env_file=None, data_dir="/tmp/t", asr_local_backend="inproc",
+                 local_asr_threads=6)
+    chain = build_transcribers(s)
+    assert [c.name for c in chain] == ["subtitle", "sensevoice"]
+    last = chain[-1]
+    assert last._model_dir == "/tmp/t/models/asr"
+    assert last._num_threads == 6
+    assert last._language == "zh"
+
+
+def test_build_transcribers_inproc_respects_manual_model_dir():
+    s = Settings(_env_file=None, data_dir="/tmp/t", asr_local_backend="inproc",
+                 local_asr_model_dir="/nfs/asr")
+    assert build_transcribers(s)[-1]._model_dir == "/nfs/asr"
+
+
+def test_whisper_fallback_wins_over_inproc_backend():
+    """asr_fallback=whisper 优先于 inproc（保留档语义不变）。"""
+    s = Settings(_env_file=None, data_dir="/tmp/t", asr_fallback="whisper",
+                 asr_local_backend="inproc")
+    assert [c.name for c in build_transcribers(s)] == ["subtitle", "whisper"]
+
+
+def test_cloud_mode_ignores_inproc_backend():
+    """配置了远程集中式 ASR 时，inproc 开关不生效（远程优先）。"""
+    s = Settings(_env_file=None, data_dir="/tmp/t", asr_local_backend="inproc",
+                 cloud_asr_provider="sensevoice", cloud_asr_base_url="http://192.168.x.x:9991")
+    chain = build_transcribers(s)
+    assert [c.name for c in chain] == ["subtitle", "cloud_asr"]
+    assert chain[-1]._base == "http://192.168.x.x:9991"
+
+
+def test_runtime_env_can_switch_backend():
+    """设置页（runtime.env）可在线切换 inproc/http。"""
+    s = Settings(_env_file=None, data_dir="/tmp/t")
+    assert s.apply_runtime({"ASR_LOCAL_BACKEND": "inproc"}).asr_local_backend_effective == "inproc"
+
+
+# ---------- 数据目录默认值（平台差异，不影响容器）----------
+
+def test_data_dir_explicit_value_used():
+    """显式 data_dir 优先（Docker 由 compose 注入 DATA_DIR=/data）。"""
+    s = Settings(_env_file=None, data_dir="/data")
+    assert s.data_dir == "/data"
+    assert s.cookie_dir == "/data/cookies"

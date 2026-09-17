@@ -7,12 +7,18 @@
   （默认 sensevoice：指向本地 sherpa-onnx OpenAI 兼容端点，复用 CloudASRTranscriber；
   whisper 保留档）；asr_fallback=none 且无远程 → 仅字幕档。
 - Embedding：provider=openai 且 base_url 配齐 → remote；否则 fastembed 本地。
+
+本地 SenseVoice 的两种形态由 ``ASR_LOCAL_BACKEND`` 决定（见 app/config.py）：
+- ``http``（默认）：调用本地 OpenAI 兼容端点——Docker 形态（侧车容器 http://asr:9991）
+  与裸机手工起 sidecar 的场景，**默认值保证与历史行为完全一致**；
+- ``inproc``：进程内直接加载 sherpa-onnx——Windows 桌面包用，省掉第二个进程与端口。
 """
 
 from app.config import Settings
 from app.core.embed.embedder import Embedder
 from app.core.llm import LLMClient
 from app.core.transcribers.cloud_asr import CloudASRTranscriber
+from app.core.transcribers.sensevoice import SenseVoiceTranscriber
 from app.core.transcribers.subtitle import SubtitleTranscriber
 from app.core.transcribers.whisper import WhisperTranscriber
 
@@ -23,9 +29,11 @@ def build_transcribers(settings: Settings) -> list:
     - asr_mode == "cloud"：Subtitle + CloudASR（远程集中式，现状路径不变）
     - asr_mode == "local"：
         - asr_fallback == "whisper"：Subtitle + Whisper（本地 faster-whisper，保留档）
-        - 否则（sensevoice 默认）：Subtitle + CloudASR 指向本地端点
-          （provider=local-sensevoice 不含 "whisper"，不发送 faster-whisper 专有参数；
-           分块/二分重试/无 segments 兜底全部继承）
+        - asr_fallback == "sensevoice"（默认）：
+            - ASR_LOCAL_BACKEND=http（默认）：CloudASR 指向本地端点
+              （provider=local-sensevoice 不含 "whisper"，不发送 faster-whisper 专有参数；
+               分块/二分重试/无 segments 兜底全部继承）
+            - ASR_LOCAL_BACKEND=inproc：进程内 SenseVoice（无 HTTP、无第二进程）
     - asr_mode == "none"：仅 Subtitle（视频无字幕时 pipeline 报可读错误）
     """
     chain = [SubtitleTranscriber()]
@@ -43,6 +51,14 @@ def build_transcribers(settings: Settings) -> list:
         if settings.asr_fallback == "whisper":
             # 保留档：本地 faster-whisper（large-v3 等），模型懒下载到 models_dir
             chain.append(WhisperTranscriber(settings.whisper_model, model_dir=settings.models_dir))
+        elif settings.asr_local_backend_effective == "inproc":
+            # 进程内 SenseVoice（Windows 桌面包）：模型目录与侧车下载器落点一致
+            chain.append(
+                SenseVoiceTranscriber(
+                    settings.asr_model_dir_effective,
+                    num_threads=settings.local_asr_threads,
+                )
+            )
         else:
             # 默认：本地 sherpa-onnx SenseVoice OpenAI 兼容端点（deploy/asr/）
             chain.append(

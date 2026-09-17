@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"
+     role="img" aria-label="videoRAG">
+  <title>videoRAG</title>
+  <!--
+    Maintainer notes. Each rule below has been violated once already, and every time
+    the logo silently stopped rendering in the browser (no error, just nothing):
+
+    1. Keep this file pure ASCII. The bundler inlines it as a data URI, and such URIs
+       must be ASCII; otherwise they need percent-encoding that toolchains may skip.
+    2. An XML comment must NOT contain two consecutive hyphens. Do not write CSS custom
+       property names (they begin with two hyphens) inside a comment: that makes the
+       document invalid XML and browsers refuse to render the whole SVG.
+  -->
+  <defs>
+    <!-- Same colors as the UI theme gradient: 135deg violet, pink, orange -->
+    <linearGradient id="vrag-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0.0%" stop-color="#7c3aed"/>
+    <stop offset="50.0%" stop-color="#ec4899"/>
+    <stop offset="100.0%" stop-color="#f97316"/>
+    </linearGradient>
+  </defs>
+  <rect x="20" y="20" width="472" height="472"
+        rx="160" ry="160" fill="url(#vrag-grad)"/>
+  <polygon points="106,140 106,372 282,256" fill="#ffffff"/>
+  <rect x="320" y="168" width="32" height="176" rx="16.0" ry="16.0" fill="#ffffff"/>
+  <rect x="372" y="200" width="32" height="112" rx="16.0" ry="16.0" fill="#ffffff"/>
+</svg>
