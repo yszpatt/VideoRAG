@@ -1,15 +1,23 @@
 name: build-windows
 
-# 打包 Windows 桌面包并发布 Release。
+# 打包 Windows 桌面包；可选发布 Release。
 # 与 Docker 链路完全独立：Docker 用户继续 `docker compose up -d --build`，互不影响。
 #
-# 手动触发（workflow_dispatch）用于验证构建链路；打 v* tag 时额外创建 Release。
+# **仅手动触发**（workflow_dispatch），两种用法：
+#   - 不填 tag：只构建，产物作为 Artifact 供下载（用来验证构建链路）
+#   - 填 tag（如 v0.1）：构建并创建/更新该 tag 的 Release，上传产物
+#
+# 刻意**不监听 tag push**：否则「在网页手动创建 release 时新建 tag」会顺带触发一次 CI，
+# 而 CI 自己构建的包会覆盖掉人工上传的 assets（两者的 ffmpeg 版本可能不同）。
+# 发布节奏由人决定；等构建链路稳定、需要自动化时再把 tag 触发打开。
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布用的 tag（如 v0.1）。留空则只构建、不发布。'
+        required: false
+        default: ''
 
 permissions:
   contents: write   # 创建 Release 需要
@@ -105,10 +113,11 @@ jobs:
             dist/videoRAG-*-windows-x64.zip
           retention-days: 30
 
-      - name: 创建 Release（仅 tag 触发）
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: 创建 / 更新 Release（填了 tag 才执行）
+        if: inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: dist/videoRAG-*-windows-x64.zip
           generate_release_notes: true
           body: |

@@ -126,7 +126,9 @@ pwsh -File packaging/build-windows.ps1     # 前端 → 依赖 → ffmpeg → Py
 
 产物：`dist/videoRAG/`（目录形态，可直接运行）与 `dist/videoRAG-<版本>-windows-x64.zip`。
 
-> CI：`.github/workflows/build-windows.yml`（打 `v*` tag 自动发布 Release）。
+> CI：`.github/workflows/build-windows.yml`（**仅手动触发**——不填 tag 只构建产物供下载，
+> 填 tag 则创建 / 更新该 tag 的 Release）。刻意不监听 tag push：否则在网页手动创建 release 时
+> 会顺带触发一次 CI，让 CI 构建的包覆盖掉人工上传的产物。
 > 另有 `.github/workflows/verify-docker.yml` 守卫容器行为——它会在容器内断言
 > 「默认数据目录仍是 `/data`、默认 ASR 后端仍是侧车 HTTP、转写链未变」，
 > 确保桌面形态的改动不会悄悄影响 Docker 运行方式。
