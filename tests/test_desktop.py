@@ -243,6 +243,144 @@ def test_probe_app_icon_missing(monkeypatch):
     assert "默认图标" in detail
 
 
+def test_probe_webview_verifies_host_window_module(monkeypatch):
+    """回归锁：探针必须验证**宿主窗口**模块（winforms），而不是只验渲染层。
+
+    踩过的坑：原先只 import ``webview.platforms.edgechromium``（渲染层，不需要 .NET）
+    就报 PASS；但 Windows 上真正的窗口实现是 ``webview.platforms.winforms``，
+    它依赖 pythonnet + .NET 6+。缺 .NET 的机器上自检全绿、窗口却起不来。
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "webview.platforms.winforms":
+            raise ImportError("模拟缺 .NET 6+ Desktop Runtime")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    name, ok, detail = desktop._probe_webview()
+    if os.name != "nt":
+        pytest.skip("该断言只针对 Windows 宿主窗口")
+    assert ok is False, "宿主窗口模块加载失败时必须判为不可用"
+    assert ".NET" in detail
+
+
+# ---------- 单实例检测 ----------
+
+class _FakeResp:
+    def __init__(self, status=200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_existing_instance_detects_running_app(monkeypatch):
+    """/health 与 /api/videos 都 200 → 认为是已有实例。"""
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: _FakeResp())
+    assert desktop._existing_instance("127.0.0.1", 8566) == "http://127.0.0.1:8566/"
+
+
+def test_existing_instance_none_when_port_closed(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def boom(url, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert desktop._existing_instance("127.0.0.1", 8566) is None
+
+
+def test_existing_instance_none_on_partial_match(monkeypatch):
+    """只有 /health 通、/api/videos 不通 → 不是本应用，不应误判。"""
+    import urllib.error
+    import urllib.request
+
+    calls = {"n": 0}
+
+    def sometimes(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeResp(200)
+        raise urllib.error.URLError("boom")
+
+    monkeypatch.setattr(urllib.request, "urlopen", sometimes)
+    assert desktop._existing_instance("127.0.0.1", 8566) is None
+
+
+def test_existing_instance_probes_loopback_for_wildcard(monkeypatch):
+    """绑 0.0.0.0 时探测目标要用 127.0.0.1。"""
+    import urllib.request
+
+    seen = {}
+
+    def fake(url, timeout=None):
+        seen["url"] = url
+        return _FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    desktop._existing_instance("0.0.0.0", 8566)
+    assert seen["url"].startswith("http://127.0.0.1:8566")
+
+
+# ---------- 应用模式窗口（--app 降级） ----------
+
+def test_find_browser_exe_prefers_path_lookup(monkeypatch):
+    monkeypatch.setattr(
+        "shutil.which", lambda n: r"C:\fake\msedge.exe" if n == "msedge" else None
+    )
+    assert desktop._find_browser_exe() == r"C:\fake\msedge.exe"
+
+
+def test_open_app_window_builds_expected_command(monkeypatch, tmp_path):
+    """--app 模式：命令要带 --app=<url>、窗口尺寸与独立 profile。"""
+    import subprocess
+
+    captured = {}
+
+    def fake_popen(cmd, **kw):
+        captured["cmd"] = cmd
+        return object()
+
+    monkeypatch.setattr(desktop, "_find_browser_exe", lambda: r"C:\fake\msedge.exe")
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    args = desktop.parse_args(["--data-dir", str(tmp_path)])
+    assert desktop._open_app_window("http://127.0.0.1:8566/", args) is True
+
+    cmd = captured["cmd"]
+    assert cmd[0] == r"C:\fake\msedge.exe"
+    assert "--app=http://127.0.0.1:8566/" in cmd
+    assert "--window-size=1360,900" in cmd
+    assert any(a.startswith("--user-data-dir=") for a in cmd)
+
+
+def test_open_app_window_false_without_browser(monkeypatch):
+    """找不到 Edge / Chrome 时要老实返回 False，交给下一级降级。"""
+    monkeypatch.setattr(desktop, "_find_browser_exe", lambda: None)
+    assert desktop._open_app_window("http://x/", desktop.parse_args([])) is False
+
+
+def test_open_app_window_false_on_popen_failure(monkeypatch, tmp_path):
+    import subprocess
+
+    monkeypatch.setattr(desktop, "_find_browser_exe", lambda: r"C:\fake\msedge.exe")
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("cannot start")),
+    )
+    args = desktop.parse_args(["--data-dir", str(tmp_path)])
+    assert desktop._open_app_window("http://x/", args) is False
+
+
 # ---------- 日志 ----------
 
 def test_resolve_log_file_defaults_under_data_dir():

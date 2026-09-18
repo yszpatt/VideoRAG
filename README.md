@@ -34,7 +34,7 @@
 docker build -t videorag .
 
 docker run -d --name videorag \
-  -p 8080:8080 \
+  -p 8566:8566 \
   -v ./data:/data \
   -e LLM_PROVIDER=deepseek \
   -e LLM_API_KEY=sk-xxx \
@@ -51,7 +51,7 @@ docker run -d --name videorag \
 
 > 环境变量太多？也可以把配置写进项目根目录 `.env`（模板：`.env.example`，`cp .env.example .env` 后修改），不传 `-e` 即可，详见「配置方式」。
 
-然后浏览器打开 `http://<nas-ip>:8080`。
+然后浏览器打开 `http://<nas-ip>:8566`。
 
 > Embedding 默认**本地 fastembed**（无需远程服务）；ASR 默认本地 SenseVoice 档位（模型在「设置 → 本地模型」下载后，用 `docker compose --profile local-asr up -d` 起侧车），详见「本地 ASR」。
 
@@ -62,7 +62,7 @@ docker run -d --name videorag \
 ```bash
 cp .env.example .env     # 1. 拷贝环境变量模板
 # 2. 编辑 .env：至少填入 LLM_API_KEY（默认 DeepSeek；任意 OpenAI 兼容均可）
-docker compose up -d     # 3. 启动 → http://localhost:8080
+docker compose up -d     # 3. 启动 → http://localhost:8566
 ```
 
 - **默认档位 = 纯本地可用**：Embedding 用内置 fastembed（`bge-small-zh`，首次使用自动下载，无需远程）；LLM 需填 key
@@ -84,7 +84,7 @@ docker compose up -d     # 3. 启动 → http://localhost:8080
 |  | Docker | Windows 桌面包 |
 |---|---|---|
 | 适用场景 | NAS / 家用服务器 / VPS | 个人 Windows 电脑 |
-| 界面 | 浏览器访问 `:8080` | 原生窗口（Edge WebView2） |
+| 界面 | 浏览器访问 `:8566` | 原生窗口（Edge WebView2） |
 | 运行形态 | 主服务 + 本地 ASR 侧车（两个容器） | 单进程（SenseVoice 进程内推理） |
 | 数据目录 | 挂载卷 `/data` | `%LOCALAPPDATA%\videoRAG` |
 | 数据目录结构 | `db/ lancedb/ notes/ models/ cookies/` | **完全一致**，可互相迁移 |
@@ -112,9 +112,13 @@ videorag-cli.exe --help
 - **首次使用**：在「设置」页（`Alt+5`）填 LLM API Key；在「本地模型」页下载 SenseVoice（≈240MB）
   与 Embedding（≈190MB）模型
 - **包内已含 ffmpeg**（Windows 静态构建，GPL 授权，由构建脚本获取而非提交仓库）
-- **系统要求**：Windows 10 1803+ / Windows 11。原生窗口依赖 **WebView2 Runtime**
-  （Win11 与多数 Win10 已自带）与 **.NET 6+**（pythonnet 桥接所需）；任一缺失时会自动回落到
-  系统浏览器打开，并在日志中说明原因，功能不受影响
+- **系统要求**：Windows 10 1803+ / Windows 11。需要 **WebView2 Runtime**（Win11 与多数
+  Win10 已自带）与 **.NET 6+ Desktop Runtime**（注意是 *Desktop* 而不是 Console 版本，
+  窗口宿主用的是桌面框架）
+- **窗口降级链**（自动进行，不会崩）：原生窗口 → 浏览器 `--app` 无地址栏窗口
+  （只需 Edge 或 Chrome，观感接近原生）→ 系统浏览器标签页
+- **重复启动**：目标端口上若已有实例在跑，只会打开它的界面、不再起第二个服务
+  （避免两个进程共写同一个数据目录，SQLite / LanceDB 有损坏风险）
 - **不要与 Docker 同时打开同一个数据目录**：SQLite / LanceDB 是单实例文件库，
   双进程并发读写有损坏风险；迁移时请先停掉一侧
 
@@ -166,7 +170,7 @@ cp .env.example .env   # 按需修改
 | `MCP_API_KEY` | - | 空 | 设置后 MCP 端点需 Bearer 鉴权（compose 模板默认 `change-me`，建议修改） |
 | `DATA_DIR` | - | `/data` | 数据根目录（容器内） |
 | `COOKIE_DIR` | - | `/data/cookies` | 平台 cookie 目录 |
-| `PORT` | - | `8080` | |
+| `PORT` | - | `8566` | |
 | `MAX_CONCURRENT_TASKS` | - | `1` | CPU 密集任务并发（NAS 建议 1） |
 | `VIDEORAG_UID` / `VIDEORAG_GID` | - | `1000` | 容器运行用户的 UID/GID：与宿主对齐后，`./data` 不再出现 root 属主文件（Docker 与裸机可共用同一份数据）；取值见 `id -u` / `id -g`，改后需 `docker compose up -d --build` |
 
@@ -278,7 +282,7 @@ docker compose up -d
 
 ## MCP（agent 外挂）
 
-MCP 端点：`http://<nas-ip>:8080/mcp`（Streamable HTTP，无状态）。
+MCP 端点：`http://<nas-ip>:8566/mcp`（Streamable HTTP，无状态）。
 
 | 工具 | 说明 |
 |------|------|
@@ -295,7 +299,7 @@ Cline CLI / 支持 Streamable HTTP 的 agent 配置（设置 `MCP_API_KEY` 后�
 {
   "mcpServers": {
     "video-rag": {
-      "url": "http://<nas-ip>:8080/mcp",
+      "url": "http://<nas-ip>:8566/mcp",
       "headers": { "Authorization": "Bearer <MCP_API_KEY>" }
     }
   }
@@ -309,7 +313,7 @@ Cline CLI / 支持 Streamable HTTP 的 agent 配置（设置 `MCP_API_KEY` 后�
 MCP 走 JSON-RPC over Streamable HTTP。无鉴权时可直接用 curl 验证连通性与工具：
 
 ```bash
-BASE=http://localhost:8080/mcp
+BASE=http://localhost:8566/mcp
 # 1) 初始化握手
 curl -s -X POST "$BASE" -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -375,18 +379,18 @@ B站对数据中心 IP 有风控。把浏览器 cookie 导出为 `/data/cookies/
 uv venv .venv
 uv pip install -p .venv/bin/python -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
 .venv/bin/python -m pytest                # 运行测试
-.venv/bin/python -m uvicorn app.main:app --port 8080
+.venv/bin/python -m uvicorn app.main:app --port 8566
 
 cd web
 npm install --registry=https://registry.npmmirror.com
-npm run dev                                # 前端开发服务器（/api 代理到 8080）
+npm run dev                                # 前端开发服务器（/api 代理到 8566）
 npm run build                              # 构建产物 web/dist，由后端托管
 ```
 
 本地免配置演示（无需 key / 模型 / 外网）：
 
 ```bash
-python scripts/dev_demo.py                 # http://localhost:8080，预置 3 个演示视频
+python scripts/dev_demo.py                 # http://localhost:8566，预置 3 个演示视频
 ```
 
 ## 数据目录（/data 卷）

@@ -111,7 +111,7 @@ jobs:
         run: |
           mkdir -p ci-data
           docker run -d --name videorag-ci \
-            -p 8080:8080 \
+            -p 8566:8566 \
             -v "$PWD/ci-data:/data" \
             -e DATA_DIR=/data \
             -e MCP_API_KEY=ci-key \
@@ -119,16 +119,16 @@ jobs:
 
           echo "等待服务就绪…"
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:8566/health >/dev/null 2>&1; then
               echo "就绪（第 ${i} 次尝试）"; break
             fi
             sleep 2
           done
-          curl -fsS http://127.0.0.1:8080/health
+          curl -fsS http://127.0.0.1:8566/health
 
       - name: MCP 端点探针
         run: |
-          curl -fsS -X POST http://127.0.0.1:8080/mcp \
+          curl -fsS -X POST http://127.0.0.1:8566/mcp \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ci-key" \
             -H "Accept: application/json, text/event-stream" \

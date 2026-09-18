@@ -94,8 +94,8 @@ dist/
 | | Docker | 桌面包 |
 |---|---|---|
 | 入口 | `uvicorn app.main:app` | `app/desktop.py` |
-| 界面 | 浏览器访问 `:8080` | 原生窗口（Edge WebView2，经 pywebview） |
-| 默认端口 | 8080（compose 端口映射） | **8566**（被占自动顺延；避开最易冲突的 8080） |
+| 界面 | 浏览器访问 `:8566` | 原生窗口（Edge WebView2，经 pywebview） |
+| 默认端口 | 8566（compose 端口映射） | **8566**（被占自动顺延；避开最易冲突的 8566） |
 | ffmpeg | 镜像内 apt 安装 | 随包 `vendor/ffmpeg`，启动注入 PATH |
 | 数据目录 | `/data`（compose 注入） | `%LOCALAPPDATA%\videoRAG` |
 | 本地 ASR | 侧车容器 HTTP `http://asr:9991` | 进程内 sherpa-onnx（`ASR_LOCAL_BACKEND=inproc`） |
@@ -130,9 +130,24 @@ dist\videoRAG\videorag-cli.exe --self-test --data-dir <临时目录>
 
 - Windows 10 1803+ / Windows 11
 - **WebView2 Runtime**（Win11 与多数 Win10 已自带）
-- **.NET 6+**（pythonnet 桥接所需；多数开发机已有）
+- **.NET 6+ Desktop Runtime** —— 注意是 **Desktop** 而不是 Console 运行时：
+  pywebview 的 WinForms 宿主窗口需要桌面框架。开发机通常已装，**干净系统可能没有**
 
-缺失时不会崩：`_run_window` 会捕获异常并回落系统浏览器，日志里写明原因。
+窗口有三级降级链，会自动进行、不会崩：
+
+| 顺序 | 形态 | 依赖 |
+|---|---|---|
+| 1 | pywebview 原生窗口 | WebView2 + .NET 6+ **Desktop** Runtime |
+| 2 | 浏览器 `--app` 窗口（无地址栏 / 无标签页，观感接近原生） | 只需 Edge 或 Chrome（Windows 自带 Edge） |
+| 3 | 系统浏览器标签页 | 任意默认浏览器 |
+
+> **踩过的坑**：`_probe_webview()` 原先只 import `webview.platforms.edgechromium`（**渲染层**，
+> 不需要 .NET）就报 PASS，但 Windows 上真正的窗口实现是 `webview.platforms.winforms`
+> ——它依赖 pythonnet + .NET。于是在缺 .NET 的机器上出现「自检全绿、窗口起不来」。
+> 现在探针直接加载 winforms 模块，并把缺失原因写进自检输出。
+
+另外启动时会检测目标端口上是否已有实例：若已有，**只打开它的界面、不再起第二个服务**
+（双开会让两个进程共写同一个数据目录，SQLite / LanceDB 有损坏风险）。
 
 ## 常见问题
 

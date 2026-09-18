@@ -163,6 +163,44 @@ def _probe_host(host: str) -> str:
     return "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
 
+def _existing_instance(host: str, port: int) -> str | None:
+    """探测该端口上是否已经跑着一个 videoRAG 实例；命中则返回它的界面地址。
+
+    为什么要查：启动第二个实例会让两个进程同时打开同一个数据目录，而 SQLite / LanceDB
+    是单实例文件库，并发读写有损坏风险。实际发生过——原生窗口失败后进程没退，
+    用户以为没打开就又启动了一次，结果两个实例同跑一个数据目录。
+
+    判据用「``/health`` 与 ``/api/videos`` 同时返回 200」：同一端口上同时具备这两个端点
+    的服务，基本只可能是本应用；这样就不必改动 ``/health`` 的返回契约。
+    """
+    import urllib.error
+    import urllib.request
+
+    base = f"http://{_probe_host(host)}:{port}"
+    for path in ("/health", "/api/videos"):
+        try:
+            with urllib.request.urlopen(f"{base}{path}", timeout=1.5) as resp:  # noqa: S310
+                if resp.status != 200:
+                    return None
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+    return f"{base}/"
+
+
+def _open_existing(url: str, args: argparse.Namespace) -> int:
+    """复用已在运行的实例：只把界面打开，不再起第二个服务。
+
+    不在这里等窗口关闭——服务是别人的，我们只是「打开界面」这一次动作，做完就退出。
+    """
+    if _open_app_window(url, args):
+        return 0
+    try:
+        webbrowser.open(url)
+    except Exception as e:  # noqa: BLE001
+        log.warning("自动打开浏览器失败：%s", e)
+    return 0
+
+
 def _wait_ready_sync(host: str, port: int, timeout: float) -> bool:
     """同步轮询 /health（主线程用，避免在窗口线程里起事件循环）。"""
     import urllib.error
@@ -221,16 +259,35 @@ def _probe_ffmpeg() -> tuple[str, bool, str]:
 
 
 def _probe_webview() -> tuple[str, bool, str]:
-    """检查原生窗口后端是否可用（决定默认能否开窗口，失败则回落浏览器）。"""
+    """检查原生窗口是否**真的能起来**。
+
+    踩过的坑：原先只 import ``webview.platforms.edgechromium`` 就判定可用，但那只验证了
+    **渲染层**；Windows 上的**宿主窗口**是 ``webview.platforms.winforms``，它依赖
+    pythonnet + .NET 6+ Desktop Runtime。缺 .NET 时 clr_loader 会退到 netfx 路径去加载
+    CoreCLR 版的 Python.Runtime.dll，报
+    ``Failed to resolve Python.Runtime.Loader.Initialize``。
+    结果是：探针在缺 .NET 的机器上依然报 PASS，而用户那边窗口根本起不来。
+    现在改为实际加载宿主窗口模块——那才是「窗口能不能开」的判据。
+    """
     try:
         import webview  # noqa: F401
     except Exception as e:  # noqa: BLE001
         return ("webview backend", False, f"pywebview 不可用: {type(e).__name__}")
+
+    if os.name != "nt":
+        # 非 Windows 走各自的原生后端，这里只确认 pywebview 可导入
+        return ("webview backend", True, "pywebview")
+
     try:
-        from webview.platforms import edgechromium  # noqa: F401
+        # 真正的窗口实现（WinForms 宿主 + WebView2 渲染），需要 pythonnet/.NET
+        import webview.platforms.winforms  # noqa: F401
     except Exception as e:  # noqa: BLE001
-        return ("webview backend", False, f"WebView2/.NET 不可用: {type(e).__name__}")
-    return ("webview backend", True, "EdgeChromium (WebView2)")
+        return (
+            "webview backend",
+            False,
+            f"缺 .NET 6+ Desktop Runtime（{type(e).__name__}: {str(e)[:48]}）",
+        )
+    return ("webview backend", True, "WinForms + EdgeChromium (WebView2)")
 
 
 def _probe_sherpa() -> tuple[str, bool, str]:
@@ -378,18 +435,76 @@ def _parse_window_size(text: str) -> tuple[int, int]:
         return WINDOW_SIZE
 
 
-def _run_window(url: str, args: argparse.Namespace, holder: dict, done: threading.Event,
-                log_file: Path | None) -> int:
-    """用 pywebview 开原生窗口，阻塞到窗口关闭。
+def _find_browser_exe() -> str | None:
+    """找一个能开 ``--app`` 窗口的 Chromium 系浏览器（Edge 优先，Windows 自带）。"""
+    from shutil import which
 
-    后端失败（无 WebView2 / 无 .NET）时回落系统浏览器，而不是直接报错退出——
-    用户至少还能用，日志里也有明确原因。
+    for name in ("msedge", "msedge.exe", "chrome", "chrome.exe"):
+        found = which(name)
+        if found:
+            return found
+    # which 依赖 PATH，Windows 上 Edge 常不在 PATH 里，补几个标准安装路径
+    for path in (
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ):
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def _open_app_window(url: str, args: argparse.Namespace) -> bool:
+    """用 Chromium 的 ``--app`` 模式开一个无地址栏、无标签页的独立窗口。
+
+    为什么需要这条降级：原生窗口依赖 .NET 6+ Desktop Runtime（经 pythonnet），
+    缺了就完全起不来（另一台机器上实际发生过）。而 ``--app`` 窗口观感接近原生
+    ——没有地址栏和标签页，就是一个独立应用窗口——且**零额外依赖**：
+    Windows 10/11 都自带 Edge。
+
+    注意：这样开的窗口关掉后我们感知不到，服务会继续在后台运行；
+    日志里会打印界面地址，需要停止时用 Ctrl+C 或任务管理器结束进程。
+    """
+    import subprocess
+
+    exe = _find_browser_exe()
+    if exe is None:
+        log.warning("未找到 Edge / Chrome，无法使用应用模式窗口")
+        return False
+
+    # 独立 profile：避免与用户日常浏览器的会话 / 扩展 / 代理设置互相影响
+    profile = Path(runtime_env.resolve_data_dir(args.data_dir)) / "browser-profile"
+    size = _parse_window_size(args.window_size)
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [
+                exe,
+                f"--app={url}",
+                f"--window-size={size[0]},{size[1]}",
+                f"--user-data-dir={profile}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("应用模式窗口启动失败：%s", e)
+        return False
+    log.info("已用浏览器应用模式打开界面（无地址栏窗口）")
+    return True
+
+
+def _try_native_window(url: str, args: argparse.Namespace, log_file: Path | None) -> bool:
+    """尝试 pywebview 原生窗口；阻塞到窗口关闭。成功返回 True。
+
+    失败只记日志并返回 False，由调用方决定怎么降级——不要在这里直接报错退出。
     """
     try:
         import webview
     except Exception as e:  # noqa: BLE001
-        log.warning("pywebview 不可用（%s），回落系统浏览器", e)
-        return _run_browser(url, holder, done)
+        log.warning("pywebview 不可用（%s）", e)
+        return False
 
     size = _parse_window_size(args.window_size)
     storage = Path(runtime_env.resolve_data_dir(args.data_dir)) / "webview"
@@ -415,13 +530,47 @@ def _run_window(url: str, args: argparse.Namespace, holder: dict, done: threadin
             storage_path=str(storage),
             icon=str(icon) if icon else None,
         )
-        return 0
+        return True
     except Exception as e:  # noqa: BLE001
-        log.exception("原生窗口启动失败")
-        _fatal(f"窗口启动失败：{e}\n\n将改用系统浏览器。", log_file)
-        return _run_browser(url, holder, done)
+        # 最常见的失败原因：缺 .NET 6+ Desktop Runtime（pythonnet 加载不了）
+        log.exception("原生窗口启动失败：%s", e)
+        if log_file:
+            log.info("可安装 .NET 6+ Desktop Runtime 以启用原生窗口；本次将改用应用模式窗口")
+        return False
+
+
+def _wait_until_stopped(holder: dict, done: threading.Event) -> int:
+    """驻留等待服务结束（Ctrl+C / 被终止），然后收尾。"""
+    try:
+        done.wait()
+    except KeyboardInterrupt:
+        pass
     finally:
         _shutdown(holder, done)
+    return 0
+
+
+def _run_window(url: str, args: argparse.Namespace, holder: dict, done: threading.Event,
+                log_file: Path | None) -> int:
+    """窗口形态的编排：原生窗口 → 应用模式窗口 → 系统浏览器标签页。
+
+    三级降级是刻意的。原生窗口体验最好但依赖 .NET 6+ Desktop Runtime；
+    ``--app`` 窗口几乎一样（无地址栏/标签页）却零依赖；最后才退到普通标签页，
+    保证「无论如何用户都能用上」。
+    """
+    if _try_native_window(url, args, log_file):
+        _shutdown(holder, done)
+        return 0
+
+    if _open_app_window(url, args):
+        return _wait_until_stopped(holder, done)
+
+    _fatal(
+        "原生窗口不可用，且未找到 Edge / Chrome。\n\n将改用系统浏览器打开。"
+        "（建议安装 .NET 6+ Desktop Runtime 以启用原生窗口）",
+        log_file,
+    )
+    return _run_browser(url, holder, done)
 
 
 def _run_browser(url: str, holder: dict, done: threading.Event) -> int:
@@ -431,13 +580,7 @@ def _run_browser(url: str, holder: dict, done: threading.Event) -> int:
         webbrowser.open(url)
     except Exception as e:  # noqa: BLE001  打开失败不致命，用户可手动访问
         log.warning("自动打开浏览器失败：%s", e)
-    try:
-        done.wait()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        _shutdown(holder, done)
-    return 0
+    return _wait_until_stopped(holder, done)
 
 
 # ---------- 主流程 ----------
@@ -452,6 +595,14 @@ def _run(args: argparse.Namespace) -> int:
 
     log.info("videoRAG 启动")
     log.info("运行环境：\n%s", runtime_env.format_summary(info))
+
+    # 目标端口上已有实例 → 直接复用它的界面，不再起第二个服务。
+    # （双开会让两个进程共写同一个数据目录，SQLite / LanceDB 有损坏风险）
+    if not args.self_test:
+        existing = _existing_instance(args.host, args.port)
+        if existing:
+            log.info("检测到已有实例正在运行（%s），直接打开它的界面", existing)
+            return _open_existing(existing, args)
 
     app = _build_app(args)
     port = runtime_env.find_free_port(args.port, args.host)
