@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ProgressTrack, { PlatformBadge, StatusChip } from "./ProgressTrack.jsx";
 import {
   fmtCount,
@@ -8,10 +9,58 @@ import {
   platformOf,
 } from "../lib/format.js";
 
-/** 收藏夹勾选面板：点一下即写入（整表替换语义，默认夹不可取消）。 */
-function CollectionPicker({ video, collections, onAssign }) {
+const POP_WIDTH = 214;
+const POP_MAX_HEIGHT = 260;
+
+/**
+ * 收藏夹勾选弹窗。
+ *
+ * 用 portal 挂到 document.body + position: fixed：卡片与封面都有 `overflow: hidden`
+ * （圆角与封面裁剪需要），挂在卡片内部的弹窗会被裁掉、也会被相邻卡片盖住——这就是
+ * 「层级错误被遮挡」的原因。挂到 body 后不受任何祖先裁剪与层叠上下文影响。
+ *
+ * 位置按触发按钮的 rect 计算：默认贴其下方，放不下则上翻 / 左右收进视口；滚动或
+ * 缩放时直接关闭（fixed 定位跟随滚动反而容易飘）。
+ */
+function CollectionPicker({ anchorRef, video, collections, onAssign, onClose }) {
+  const [pos, setPos] = useState(null);
   const current = new Set(video.collection_ids || []);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const place = () => {
+      const a = anchorRef.current?.getBoundingClientRect();
+      if (!a) return;
+      const height = Math.min(POP_MAX_HEIGHT, 74 + collections.length * 30);
+      let left = a.left;
+      let top = a.bottom + 6;
+      if (left + POP_WIDTH > window.innerWidth - 8) {
+        left = Math.max(8, window.innerWidth - POP_WIDTH - 8);
+      }
+      if (top + height > window.innerHeight - 8) {
+        top = Math.max(8, a.top - height - 6); // 下方放不下 → 翻到按钮上方
+      }
+      setPos({
+        left,
+        top,
+        maxHeight: Math.max(120, Math.min(POP_MAX_HEIGHT, window.innerHeight - top - 16)),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [anchorRef, collections.length]);
+
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && onClose();
+    const onScroll = () => onClose();
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [onClose]);
 
   const toggle = async (coll) => {
     if (coll.is_default || busy) return; // 默认收藏夹：自动归属、不可取消
@@ -26,42 +75,59 @@ function CollectionPicker({ video, collections, onAssign }) {
     }
   };
 
-  return (
-    <div className="vc-col-pop" onClick={(e) => e.stopPropagation()}>
-      <div className="vc-col-pop-head">
-        加入收藏夹
-        <span className="muted small">点击即保存</span>
+  return createPortal(
+    <>
+      {/* 点空白处关闭：垫在弹窗下一层，顺带阻止点穿到卡片 */}
+      <div className="vc-col-mask" onClick={onClose} />
+      <div
+        className="vc-col-pop"
+        style={{
+          left: pos?.left ?? -9999,
+          top: pos?.top ?? -9999,
+          width: POP_WIDTH,
+          maxHeight: pos?.maxHeight ?? POP_MAX_HEIGHT,
+        }}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label="加入收藏夹"
+      >
+        <div className="vc-col-pop-head">
+          加入收藏夹
+          <span className="muted small">点击即保存</span>
+        </div>
+        <ul className="vc-col-pop-list">
+          {collections.map((c) => {
+            const on = current.has(c.id);
+            return (
+              <li key={c.id}>
+                <label className={`vc-col-item${c.is_default ? " is-locked" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={c.is_default || busy}
+                    onChange={() => toggle(c)}
+                  />
+                  <span className="vc-col-name">{c.name}</span>
+                  {c.is_default && <span className="vc-col-tag">自动</span>}
+                </label>
+              </li>
+            );
+          })}
+          {collections.length === 0 && <li className="muted small">还没有收藏夹</li>}
+        </ul>
       </div>
-      <ul className="vc-col-pop-list">
-        {collections.map((c) => {
-          const on = current.has(c.id);
-          return (
-            <li key={c.id}>
-              <label className={`vc-col-item${c.is_default ? " is-locked" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={on}
-                  disabled={c.is_default || busy}
-                  onChange={() => toggle(c)}
-                />
-                <span className="vc-col-name">{c.name}</span>
-                {c.is_default && <span className="vc-col-tag">自动</span>}
-              </label>
-            </li>
-          );
-        })}
-        {collections.length === 0 && <li className="muted small">还没有收藏夹</li>}
-      </ul>
-    </div>
+    </>,
+    document.body,
   );
 }
 
-function Thumb({ video, onDelete, collections = [], onAssign, onTogglePicker, pickerOpen }) {
+function Thumb({ video, onDelete }) {
   const pf = platformOf(video.platform);
   const [failed, setFailed] = useState(false);
   // 有 has_thumbnail 时渲染 <img>，由后端 /thumbnail 端点按需代理下载并缓存；
   // 下载失败时 onError 回落到平台色占位，避免破图。
-  // 处理状态浮标覆盖在封面右上角，便于一眼看到进度/失败。
+  // 封面上只留两个浮层：删除=左上、状态=右上（收藏夹入口移到卡片页脚，
+  // 避免小卡片上「上下两个角」的按钮挤在一起）
   const DelBtn = onDelete ? (
     <button
       type="button"
@@ -78,25 +144,6 @@ function Thumb({ video, onDelete, collections = [], onAssign, onTogglePicker, pi
       </svg>
     </button>
   ) : null;
-  const ColBtn = onAssign ? (
-    <button
-      type="button"
-      className={`vc-col-btn${pickerOpen ? " is-active" : ""}`}
-      title="加入收藏夹"
-      aria-label="加入收藏夹"
-      onClick={(e) => {
-        e.stopPropagation();
-        onTogglePicker();
-      }}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
-      </svg>
-    </button>
-  ) : null;
-  const Picker = pickerOpen ? (
-    <CollectionPicker video={video} collections={collections} onAssign={onAssign} />
-  ) : null;
   if (video.has_thumbnail && !failed) {
     return (
       <div className="vc-thumb">
@@ -108,9 +155,7 @@ function Thumb({ video, onDelete, collections = [], onAssign, onTogglePicker, pi
           onError={() => setFailed(true)}
         />
         <StatusChip status={video.status} />
-        {ColBtn}
         {DelBtn}
-        {Picker}
       </div>
     );
   }
@@ -124,9 +169,7 @@ function Thumb({ video, onDelete, collections = [], onAssign, onTogglePicker, pi
         {(pf.short || "?").slice(0, 1)}
       </div>
       <StatusChip status={video.status} />
-      {ColBtn}
       {DelBtn}
-      {Picker}
     </div>
   );
 }
@@ -140,6 +183,7 @@ export default function VideoCard({
   onAssign,
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const colBtnRef = useRef(null);
   const title = video.title || video.url;
   const dur = fmtDuration(video.duration_sec);
   const views = fmtCount(video.view_count);
@@ -161,14 +205,7 @@ export default function VideoCard({
       role="button"
       tabIndex={0}
     >
-      <Thumb
-        video={video}
-        onDelete={onDelete}
-        collections={collections}
-        onAssign={onAssign}
-        pickerOpen={pickerOpen}
-        onTogglePicker={() => setPickerOpen((v) => !v)}
-      />
+      <Thumb video={video} onDelete={onDelete} />
       <div className="vc-body">
         <header className="vc-head">
           <PlatformBadge platform={video.platform} />
@@ -190,19 +227,50 @@ export default function VideoCard({
         {video.error && <p className="vc-error">{video.error}</p>}
 
         <footer className="vc-foot">
+          {onAssign && (
+            <button
+              type="button"
+              ref={colBtnRef}
+              className={`vc-foot-col${pickerOpen ? " is-open" : ""}`}
+              title="加入收藏夹"
+              aria-label="加入收藏夹"
+              onClick={(e) => {
+                e.stopPropagation();
+                setPickerOpen((v) => !v);
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+              </svg>
+              收藏夹
+            </button>
+          )}
           <span className="vc-open">查看笔记 →</span>
         </footer>
 
-        {mine.length > 0 && (
+        {/* 只列「非默认」的收藏夹：默认夹人人都有，列出来只是噪声 */}
+        {mine.some((c) => !c.is_default) && (
           <div className="vc-cols" title="所属收藏夹">
-            {mine.map((c) => (
-              <span className={`vc-col-chip${c.is_default ? " is-default" : ""}`} key={c.id}>
-                {c.name}
-              </span>
-            ))}
+            {mine
+              .filter((c) => !c.is_default)
+              .map((c) => (
+                <span className="vc-col-chip" key={c.id}>
+                  {c.name}
+                </span>
+              ))}
           </div>
         )}
       </div>
+
+      {pickerOpen && onAssign && (
+        <CollectionPicker
+          anchorRef={colBtnRef}
+          video={video}
+          collections={collections}
+          onAssign={onAssign}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
     </article>
   );
 }
