@@ -107,7 +107,8 @@ async def test_process_video_end_to_end(tmp_path):
 
     from app.config import Settings
     from app.db import init_db, make_session_factory
-    from app.models import Chunk, Note, Segment as ORMSegment, Video
+    from app.models import Chunk, Note, Video
+    from app.models import Segment as ORMSegment
 
     settings = Settings(_env_file=None, data_dir=str(tmp_path))
     engine, factory = make_session_factory(settings)
@@ -226,7 +227,6 @@ async def test_embed_chunks_batches_to_bound_memory(tmp_path):
     - vector_store.add 被多次调用（每批一次）；
     - ensure_fts_index 只在全部批次写完后调用一次（不随批次重复建索引）。
     """
-    from pathlib import Path
 
     from sqlalchemy import select
 
@@ -456,3 +456,126 @@ async def test_process_video_no_archive_when_dir_unset(tmp_path, monkeypatch):
     async with factory() as s:
         assert (await s.get(Video, "vid-noarch")).status == "done"
     await engine.dispose()
+
+
+class PurgeAwareStore:
+    """向量库替身：delete_by_video_id 语义与真实 VectorStore 一致（按视频清行）。"""
+
+    def __init__(self):
+        self.rows = []
+
+    def add(self, rows):
+        self.rows.extend(rows)
+
+    def ensure_fts_index(self):
+        pass
+
+    def has_kind_rows(self, video_id, kind="meta"):
+        return any(
+            r["video_id"] == video_id and r.get("kind") == kind for r in self.rows
+        )
+
+    def delete_by_video_id(self, video_id):
+        self.rows = [r for r in self.rows if r["video_id"] != video_id]
+
+
+async def _run_counts(factory, store, video_id):
+    """取一次该视频的落库计数（重跑幂等的判据）。"""
+    from sqlalchemy import func, select
+
+    from app.models import Chunk, Note, Video
+    from app.models import Segment as ORMSegment
+
+    async with factory() as s:
+        v = await s.get(Video, video_id)
+        out = {"status": v.status, "error": v.error}
+        for key, model in (
+            ("segments", ORMSegment),
+            ("notes", Note),
+            ("chunks", Chunk),
+        ):
+            out[key] = (
+                await s.execute(
+                    select(func.count()).select_from(model).where(
+                        model.video_id == video_id
+                    )
+                )
+            ).scalar_one()
+    out["vector_rows"] = len([r for r in store.rows if r["video_id"] == video_id])
+    out["meta_rows"] = len(
+        [r for r in store.rows if r["video_id"] == video_id and r.get("kind") == "meta"]
+    )
+    return out
+
+
+async def test_process_video_rerun_is_idempotent(tmp_path, monkeypatch):
+    """重跑（崩溃恢复 / 手动重试）必须幂等：转写、笔记、切片、向量都不翻倍。
+
+    回归：修复前第二次执行会 (a) 逐句转写翻倍、(b) 撞 ``notes.video_id`` 唯一
+    约束抛 IntegrityError，被兜底 except 转成 status=failed 且 error 里是原始
+    SQLAlchemy 堆栈；而 Queue.recover 每次进程重启都会重跑 running 任务。
+    """
+    from app.config import Settings
+    from app.db import init_db, make_session_factory
+    from app.jobs import pipeline as pl
+    from app.models import Video
+
+    async def fake_meta(url, cookie_dir=None, **kw):
+        return {
+            "title": "真实标题",
+            "description": "简介正文",
+            "author": "up",
+            "duration": 30.0,
+            "comments": [{"author": "a", "text": "热评", "like_count": 3}],
+        }
+
+    monkeypatch.setattr(pl, "fetch_metadata", fake_meta)
+
+    settings = Settings(_env_file=None, data_dir=str(tmp_path))
+    engine, factory = make_session_factory(settings)
+    await init_db(engine, settings)
+    async with factory() as s:
+        s.add(Video(id="vid-re", platform="youtube", url="https://youtu.be/x", title="T"))
+        await s.commit()
+
+    fetchers = [
+        FakeFetcher(
+            name="sub",
+            result=FetchedMedia(
+                kind="subtitle", subtitle_text="hi", meta={"segments": [(0, 1, "hi")]}
+            ),
+        )
+    ]
+    transcribers = [
+        FakeTranscriber(
+            name="subtitle",
+            result=Transcript(
+                segments=[Segment(0, 1, "hi"), Segment(1, 2, "yo")],
+                raw_text="hiyo",
+                source="subtitle",
+            ),
+        )
+    ]
+    store = PurgeAwareStore()
+
+    await process_video(  # 第一次：正常摄入
+        "vid-re", factory, fetchers, transcribers, FakeLLM(), str(tmp_path),
+        embedder=FakeEmbedder(), vector_store=store,
+    )
+    first = await _run_counts(factory, store, "vid-re")
+    await process_video(  # 第二次：模拟崩溃恢复后的重跑
+        "vid-re", factory, fetchers, transcribers, FakeLLM(), str(tmp_path),
+        embedder=FakeEmbedder(), vector_store=store,
+    )
+    again = await _run_counts(factory, store, "vid-re")
+
+    # 幂等判据：重跑后各计数与首跑完全一致（不是翻倍）
+    assert again == first
+    assert again["status"] == "done"
+    assert again["error"] is None
+    assert again["segments"] == 2
+    assert again["notes"] == 1
+    assert again["meta_rows"] == 1
+    assert again["chunks"] == again["vector_rows"]  # SQLite 镜像与向量行一一对应
+    await engine.dispose()
+

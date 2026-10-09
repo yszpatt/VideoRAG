@@ -14,7 +14,7 @@ from app.core.fetchers.base import FetchedMedia, Fetcher
 from app.core.fetchers.ytdlp import FetchError, fetch_metadata, fetch_video
 from app.core.media_archive import archive_media
 from app.core.notes import NoteData, generate_note, render_markdown
-from app.core.transcribers.base import Transcript, Transcriber
+from app.core.transcribers.base import Transcriber, Transcript
 from app.core.vision import is_speechless, merge_transcripts, run_visual_pipeline
 from app.models import Chunk as ORMChunk
 from app.models import Comment, Note, Segment, Video, new_id
@@ -86,6 +86,12 @@ async def process_video(
 ) -> None:
     """单个视频的完整摄入流程：metadata → fetch → transcribe →（视觉旁路）→ note → embed → done。
 
+    **可重跑（幂等）**：本函数必须能被安全地重复执行——崩溃恢复（Queue.recover）
+    会把遗留的 running 任务重置为 pending 重跑，手动重试同理。因此每一步都以
+    「替换」而非「追加」落库：转写替换该视频已有 segments、笔记按 video_id
+    upsert、向量切片写入前先清掉旧切片（SQLite 镜像 + LanceDB 行）。详见
+    _purge_video_index / _store_segments / _save_note 的说明。
+
     - metadata（E1）：抓取标题/简介/封面/热评，失败只记日志不 fail 视频；
       成功后标题/简介/热评注入笔记上下文（note_vars）；
     - media_save_dir（新增）：已下载媒体归档目录，空 = 不保存（默认，行为不变）。
@@ -104,6 +110,8 @@ async def process_video(
         title = video.title or video.url
         platform = video.platform
         duration_sec = video.duration_sec
+        # 库内已有简介：本次元数据抓取失败时的兜底（重跑不丢已入库的 meta 分片）
+        description_saved = video.description
 
     media: FetchedMedia | None = None
     try:
@@ -135,13 +143,16 @@ async def process_video(
 
         if embedder is not None and vector_store is not None:
             await _save(session_factory, video_id, status="embedding")
+            # 重跑清场：先删掉该视频已有的切片与向量行，再把新切片写进去，
+            # 否则重跑只会「追加」，检索里会出现同一段落的重复引用。
+            await _purge_video_index(session_factory, video_id, vector_store)
             await _embed_chunks(
                 session_factory, video_id, transcript, title, platform,
                 embedder, vector_store,
             )
             await _embed_meta(
                 session_factory, video_id, title,
-                (meta or {}).get("description"), platform,
+                (meta or {}).get("description") or description_saved, platform,
                 embedder, vector_store,
             )
 
@@ -234,6 +245,10 @@ async def _save(session_factory, video_id, status=None, error=None):
         v = await s.get(Video, video_id)
         if status:
             v.status = status
+            # 重跑成功后清掉上一次失败留下的 error：否则详情页会长期挂着
+            # 一条早已过期的报错（状态 done + 红字错误信息自相矛盾）。
+            if status != "failed":
+                v.error = None
         if error:
             v.error = error
         await s.commit()
@@ -310,7 +325,12 @@ def _note_vars_from_meta(meta: dict | None) -> dict | None:
 
 
 async def _store_segments(session_factory, video_id, transcript: Transcript) -> None:
+    """落库该视频的逐句转写：先删旧再插新（重跑 = 替换，不是追加）。
+
+    没有这一步时，崩溃恢复/手动重跑会让同一视频的转写翻倍（检索、导出都会重复）。
+    """
     async with session_factory() as s:
+        await s.execute(delete(Segment).where(Segment.video_id == video_id))
         for seg in transcript.segments:
             s.add(
                 Segment(
@@ -328,23 +348,30 @@ async def _store_segments(session_factory, video_id, transcript: Transcript) -> 
 async def _save_note(
     session_factory, video_id: str, note: NoteData, title: str, data_dir: str
 ) -> None:
+    """写笔记文件 + upsert 笔记行。
+
+    用 upsert 而非直接 insert：``notes.video_id`` 有唯一约束，重跑时直接 insert
+    会抛 IntegrityError，被 process_video 的兜底 except 吞掉后把视频误标成
+    failed（且 error 里是原始 SQLAlchemy 堆栈）。upsert 同时保留首建时间。
+    """
     md = render_markdown(note, title)
     notes_dir = Path(data_dir) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
     path = notes_dir / f"{video_id}.md"
     path.write_text(md, encoding="utf-8")
     async with session_factory() as s:
-        s.add(
-            Note(
-                video_id=video_id,
-                summary=note.summary,
-                chapters=note.chapters,
-                key_points=note.key_points,
-                quotes=note.quotes,
-                glossary=note.glossary,
-                markdown=md,
-            )
-        )
+        row = (
+            await s.execute(select(Note).where(Note.video_id == video_id))
+        ).scalar_one_or_none()
+        if row is None:
+            row = Note(video_id=video_id)
+            s.add(row)
+        row.summary = note.summary
+        row.chapters = note.chapters
+        row.key_points = note.key_points
+        row.quotes = note.quotes
+        row.glossary = note.glossary
+        row.markdown = md
         v = await s.get(Video, video_id)
         v.note_path = str(path)
         await s.commit()
@@ -360,6 +387,28 @@ def assert_model_compat(vector_store, embedder, vec: list[float]) -> None:
     if checker is None or not fp:
         return
     checker({**fp, "dim": len(vec)})
+
+
+async def _purge_video_index(session_factory, video_id: str, vector_store) -> None:
+    """重跑前的清场：删除该视频已有的切片镜像（SQLite）与向量行（LanceDB）。
+
+    为什么需要：``Queue.recover`` 在每次进程启动时把遗留的 running 任务重置为
+    pending 重跑，而切片入库是「追加」语义——不清场就会让同一视频的切片与向量
+    翻倍，检索结果出现重复引用（meta 分片因 has_kind_rows 幂等守卫不会翻倍，
+    但会被这里一并清掉后重新写入，结果一致）。
+
+    为什么放在 embedding 阶段入口：此时转写与笔记都已成功，清掉的是「即将被
+    重建」的派生数据。若写入中途失败，视频会标 failed，重新触发一次重跑即可
+    再次清场重建；原文（segments）与笔记都不受影响。
+
+    向量库清理走 ``delete_by_video_id``（测试替身可能没有该方法 → 跳过）。
+    """
+    async with session_factory() as s:
+        await s.execute(delete(ORMChunk).where(ORMChunk.video_id == video_id))
+        await s.commit()
+    purge = getattr(vector_store, "delete_by_video_id", None)
+    if purge is not None:
+        await asyncio.to_thread(purge, video_id)
 
 
 # embedding 分批大小：一次向量化/入库的切片上限。
