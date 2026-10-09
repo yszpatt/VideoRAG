@@ -4,7 +4,7 @@ import Markdown from "../components/Markdown.jsx";
 import CiteCard from "../components/CiteCard.jsx";
 
 // 单轮问答：问题气泡 + 回答气泡（含引用）。pending 时只渲染「思考中」。
-function Turn({ turn, asking, onAsk, copied, onCopy }) {
+function Turn({ turn, asking, onAsk, copied, onCopy, answerRef }) {
   return (
     <div className="ask-turn">
       <div className="ask-bubble is-question">
@@ -15,7 +15,7 @@ function Turn({ turn, asking, onAsk, copied, onCopy }) {
       </div>
 
       {asking ? (
-        <div className="ask-bubble is-answer">
+        <div className="ask-bubble is-answer" ref={answerRef}>
           <span className="ask-bubble-avatar is-ai" aria-hidden="true">
             <span className="ask-avatar-dot" />
           </span>
@@ -27,7 +27,7 @@ function Turn({ turn, asking, onAsk, copied, onCopy }) {
           </div>
         </div>
       ) : (
-        <div className="ask-bubble is-answer">
+        <div className="ask-bubble is-answer" ref={answerRef}>
           <span className="ask-bubble-avatar is-ai" aria-hidden="true">
             <span className="ask-avatar-dot" />
           </span>
@@ -84,8 +84,10 @@ export default function AskView({
   onImport,
 }) {
   const [copied, setCopied] = useState(false);
-  // 线程滚动容器引用：新轮次出现时自动滚到底部，使最新内容进入可视区
+  // 线程滚动容器引用
   const scrollRef = useRef(null);
+  // 最新一轮的「回答气泡」引用：滚动定位到它的首行，而不是容器底部
+  const lastAnswerRef = useRef(null);
 
   // 历史回看优先（遗留单条记录分支，当前主流程不触发）；否则渲染多轮会话线程。
   const isHistory = !!hist;
@@ -133,13 +135,32 @@ export default function AskView({
   const turns = thread || [];
   const pendingTurn = pending ? { id: "pending", question: pending.question, answer: "", citations: [] } : null;
 
-  // 新轮次（thread 增长）/ 在途轮次（pending）/ 思考态变化时，自动滚到线程底部，
-  // 让最新提问与回答进入可视区，避免连续追问后需手动翻页才能看到新内容。
+  // 新轮次 / 在途轮次变化时的滚动定位：**对齐最新一轮回答的首行**。
+  //
+  // 原来是无条件 `scrollTop = scrollHeight`（滚到最底）：答案通常比视口长，
+  // 于是提问完直接落在答案结尾，得自己往上翻才能从头读（用户反馈）。
+  // 现在把回答气泡的顶边对到滚动区顶部（留 8px 余量）：
+  // - 答案到达时 → 从回答第一行开始读；
+  // - 在途（思考中）时最后一个气泡是「正在检索并生成答案…」→ 问题与它一起可见。
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [turns.length, pending, asking]);
+    const node = lastAnswerRef.current;
+    if (!el || !node) return undefined;
+    const align = (smooth) => {
+      const top =
+        node.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+      el.scrollTo({ top: Math.max(0, top - 8), behavior: smooth ? "smooth" : "auto" });
+    };
+    align(true);
+    // 答案落地后，Markdown 里的代码块/引用列表仍会回流，一次对齐会「滚过头」。
+    // 补两次即时对齐（间隔覆盖回流窗口），保证最终停在回答首行。
+    const t1 = setTimeout(() => align(false), 200);
+    const t2 = setTimeout(() => align(false), 600);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [turns.length, pending, asking, isHistory, result]);
 
   return (
     <div className={`ask-page${active ? " is-conversation" : ""}`}>
@@ -196,7 +217,7 @@ export default function AskView({
               </div>
             </div>
             {result && (
-              <div className="ask-bubble is-answer">
+              <div className="ask-bubble is-answer" ref={lastAnswerRef}>
                 <span className="ask-bubble-avatar is-ai" aria-hidden="true">
                   <span className="ask-avatar-dot" />
                 </span>
@@ -258,18 +279,27 @@ export default function AskView({
               </button>
             </div>
 
-            {turns.map((t) => (
+            {turns.map((t, i) => (
               <Turn
                 key={t.id}
                 turn={t}
                 onAsk={onAsk}
                 copied={copied}
                 onCopy={copyAnswer}
+                // 只有最后一条挂引用：滚动要对齐的就是「最新一轮」
+                answerRef={!pendingTurn && i === turns.length - 1 ? lastAnswerRef : undefined}
               />
             ))}
 
             {pendingTurn && (
-              <Turn turn={pendingTurn} asking onAsk={onAsk} copied={copied} onCopy={copyAnswer} />
+              <Turn
+                turn={pendingTurn}
+                asking
+                onAsk={onAsk}
+                copied={copied}
+                onCopy={copyAnswer}
+                answerRef={lastAnswerRef}
+              />
             )}
           </div>
         )}
