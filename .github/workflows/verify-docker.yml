@@ -42,7 +42,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 构建主镜像
-        run: docker build -t videorag:ci .
+        run: |
+          # 用当前用户的 UID/GID 构建：容器以非 root 的 app 用户运行，后面「启动服务
+          # 并探活」还会把 ci-data 绑定挂到 /data。镜像里的 app 用户与宿主目录属主
+          # 不一致时，应用启动就会 PermissionError: '/data/db'（GitHub runner 的 UID
+          # 是 1001，不是 Dockerfile 默认的 1000——本工作流曾因此在 main 上长期红）。
+          # 与 compose 用 VIDEORAG_UID/VIDEORAG_GID 对齐宿主属主的做法一致。
+          docker build \
+            --build-arg APP_UID="$(id -u)" \
+            --build-arg APP_GID="$(id -g)" \
+            -t videorag:ci .
 
       - name: 构建本地 ASR 侧车镜像
         run: docker build -t videorag-asr:ci ./deploy/asr
