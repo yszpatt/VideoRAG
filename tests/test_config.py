@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 
-import pytest
-
 from app.config import Settings
 
 
@@ -112,3 +110,47 @@ def test_paths_derived_from_data_dir(monkeypatch):
     assert s.db_path == "/tmp/videorag-test/db/videorag.db"
     assert s.lancedb_path == "/tmp/videorag-test/lancedb"
     assert s.models_dir == "/tmp/videorag-test/models"
+
+
+def test_apply_hf_endpoint_sets_env_and_strips_slash(monkeypatch):
+    """EMBED_DOWNLOAD_ENDPOINT → HF_ENDPOINT（去尾部斜杠；留空不动环境变量）。
+
+    回归：该配置此前是静默失效的——下载管理器构造了 env 字典却从未使用，
+    设置页/README 承诺的镜像端点实际不生效。
+    """
+    from app.core.local_models.manager import apply_hf_endpoint
+
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    s = Settings(_env_file=None, embed_download_endpoint="https://hf-mirror.com/")
+    assert apply_hf_endpoint(s) == "https://hf-mirror.com"
+    assert os.environ["HF_ENDPOINT"] == "https://hf-mirror.com"
+
+    # 未配置时不清掉已有的 HF_ENDPOINT（显式环境变量照旧生效）
+    monkeypatch.setenv("HF_ENDPOINT", "https://my.mirror")
+    s2 = Settings(_env_file=None, embed_download_endpoint="")
+    assert apply_hf_endpoint(s2) == ""
+    assert os.environ["HF_ENDPOINT"] == "https://my.mirror"
+
+
+def test_create_app_applies_hf_endpoint_before_building_embedder(monkeypatch, tmp_path):
+    """接线回归：create_app 必须在构造 embedder 之前落下 HF_ENDPOINT。
+
+    huggingface_hub 的 ENDPOINT 常量在 import 时固化（fastembed 会提前 import
+    它），因此这个「早于 embedder」的顺序就是功能本身，不能只测纯函数。
+    """
+    from app.main import create_app
+
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    settings = Settings(
+        _env_file=None,
+        data_dir=str(tmp_path),
+        embed_download_endpoint="https://hf-mirror.com",
+    )
+    create_app(
+        settings=settings,
+        fetchers=[],
+        transcribers=[],
+        embedder=object(),
+        vector_store=object(),
+    )
+    assert os.environ["HF_ENDPOINT"] == "https://hf-mirror.com"

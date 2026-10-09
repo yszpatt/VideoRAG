@@ -10,10 +10,10 @@ from app.api.settings import router as settings_router
 from app.api.vectorstore import router as vectorstore_router
 from app.api.videos import router as videos_router
 from app.config import Settings
-from app.core.fetchers.ytdlp import YtdlpFetcher
 from app.core.factory import build_embedder, build_llm, build_transcribers
+from app.core.fetchers.ytdlp import YtdlpFetcher
 from app.core.local_models.api import router as models_router
-from app.core.local_models.manager import ModelManager
+from app.core.local_models.manager import ModelManager, apply_hf_endpoint
 from app.core.media_archive import ensure_archive_dir
 from app.core.prompts import PromptRegistry
 from app.core.queue import Queue, TaskHandler, start_workers
@@ -40,6 +40,10 @@ def create_app(
     runtime = load_runtime_env(settings.data_dir)
     if runtime:
         settings = settings.apply_runtime(runtime)
+
+    # 模型下载镜像端点必须在构造 embedder（会 import fastembed → huggingface_hub）
+    # 之前落到 HF_ENDPOINT：该常量在 huggingface_hub import 时固化，晚了就不生效。
+    apply_hf_endpoint(settings)
 
     engine, sf = session_factory or make_session_factory(settings)
     fetchers = fetchers or [YtdlpFetcher(cookie_dir=settings.cookie_dir)]

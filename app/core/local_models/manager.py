@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -25,6 +26,28 @@ from app.core.local_models.registry import ModelSpec, get_spec
 log = logging.getLogger(__name__)
 
 JOB_STATES = ("idle", "downloading", "verifying", "done", "failed", "cancelled")
+
+
+def apply_hf_endpoint(settings: Settings) -> str:
+    """把 ``EMBED_DOWNLOAD_ENDPOINT`` 落到 ``HF_ENDPOINT`` 环境变量，返回生效值。
+
+    为什么必须显式落环境变量：``huggingface_hub.constants.ENDPOINT`` 是在该模块
+    **import 时** 由 ``os.getenv("HF_ENDPOINT")`` 固化的常量——之后再改环境变量、
+    或给 ``snapshot_download`` 传参都不生效；而 fastembed（``build_embedder``）
+    会提前把 huggingface_hub 导进来。
+
+    因此：应用启动时由 ``create_app`` 在构造 embedder **之前** 调用（主路径）；
+    ``_download_hf`` 里再兜底调一次，覆盖「不经 create_app 直接用本管理器」的
+    脚本场景（那时 huggingface_hub 可能尚未被导入）。
+
+    显式配置优先于已存在的 HF_ENDPOINT（与「runtime.env 优先级最高」一致）。
+    修复前该配置是**静默失效**的：``_download_hf`` 构造了 env 字典却从未使用，
+    设置页与 .env.example 承诺的下载镜像端点实际不起作用。
+    """
+    endpoint = (settings.embed_download_endpoint or "").strip().rstrip("/")
+    if endpoint:
+        os.environ["HF_ENDPOINT"] = endpoint
+    return endpoint
 
 
 @dataclass
@@ -261,14 +284,12 @@ class ModelManager:
 
         在线程中执行（同步库）；进度按"文件级"汇报（3~5 个文件，大头单文件）。
         """
+        # 兜底：不经 create_app 直接调用本管理器时也要让镜像端点生效（见
+        # apply_hf_endpoint 的说明——必须在 huggingface_hub import 之前设置）。
+        apply_hf_endpoint(self._settings)
         from huggingface_hub import snapshot_download
 
         cache_dir.mkdir(parents=True, exist_ok=True)
-        endpoint = self._settings.embed_download_endpoint or None
-        env: dict[str, str] = {}
-        if endpoint:
-            import os
-            env = {**os.environ, "HF_ENDPOINT": endpoint}
 
         job.file_total = len(spec.hf_files)
         job.stage = "枚举模型文件"
