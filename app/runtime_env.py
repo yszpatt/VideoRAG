@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterable, Sequence
 
 # 捆绑的 ffmpeg 候选目录（相对 bundle 根）；按顺序取第一个存在的
@@ -101,6 +101,19 @@ def _normalize_path(path: str) -> str:
     return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
 
 
+def windows_default_data_dir(env: dict[str, str]) -> str:
+    """Windows 默认数据目录：``%LOCALAPPDATA%\\videoRAG``（无则退回用户主目录）。
+
+    用 ``PureWindowsPath`` 而非 ``Path``：纯路径对象在**任何平台上**都能构造
+    并给出一致的 Windows 字符串，因此本函数与它的测试不依赖运行平台
+    （``Path`` 会按 ``os.name`` 选择 flavour，在 POSIX 上构造 Windows 路径会
+    直接抛 UnsupportedOperation）。同一份默认值逻辑在 ``app/config.py``
+    的 ``_default_data_dir`` 里有一份镜像实现（该模块不能 import 应用代码）。
+    """
+    base = env.get("LOCALAPPDATA") or str(Path.home())
+    return str(PureWindowsPath(base) / "videoRAG")
+
+
 def resolve_data_dir(cli_value: str | None = None, env: dict[str, str] | None = None) -> str:
     """解析数据根目录，优先级：CLI > VIDEORAG_DATA_DIR/DATA_DIR > 便携模式 > 平台默认。
 
@@ -116,8 +129,7 @@ def resolve_data_dir(cli_value: str | None = None, env: dict[str, str] | None = 
         return _normalize_path(str(bundle_root() / "data"))
     # 与 app/config.py 的 _default_data_dir 保持一致（此处不 import 应用代码）
     if os.name == "nt":
-        base = env.get("LOCALAPPDATA") or str(Path.home())
-        return _normalize_path(str(Path(base) / "videoRAG"))
+        return _normalize_path(windows_default_data_dir(env))
     return "/data"
 
 

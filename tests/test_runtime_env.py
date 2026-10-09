@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import socket
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -79,11 +79,33 @@ def test_resolve_data_dir_portable_disabled(monkeypatch, tmp_path, flag):
     assert Path(got) != (runtime_env.bundle_root() / "data").resolve()
 
 
+def test_windows_default_data_dir_uses_localappdata(monkeypatch, tmp_path):
+    """Windows 默认目录 = %LOCALAPPDATA%\\videoRAG（在任何平台上都可断言）。
+
+    这里刻意用 PureWindowsPath 构造期望值：测试不再依赖运行平台，
+    也就不会出现在 Linux 上构造 WindowsPath 直接抛错的假失败。
+    """
+    got = runtime_env.windows_default_data_dir({"LOCALAPPDATA": r"C:\Users\me\AppData\Local"})
+    assert got == r"C:\Users\me\AppData\Local\videoRAG"
+
+
+def test_windows_default_data_dir_falls_back_to_home(monkeypatch, tmp_path):
+    """LOCALAPPDATA 缺失时退回用户主目录下的 videoRAG。"""
+    monkeypatch.setattr(runtime_env.Path, "home", lambda: str(tmp_path))
+    got = runtime_env.windows_default_data_dir({})
+    assert got == str(PureWindowsPath(str(tmp_path)) / "videoRAG")
+
+
 def test_resolve_data_dir_windows_default(monkeypatch, tmp_path):
-    """Windows 无显式配置 → %LOCALAPPDATA%\\videoRAG。"""
+    """Windows 无显式配置 → 走 Windows 默认分支（而非 /data）。
+
+    只断言分支选择与 env 传递；具体路径拼法由上面的
+    windows_default_data_dir 用例覆盖（那部分与平台无关）。
+    """
     monkeypatch.setattr(os, "name", "nt")
     got = runtime_env.resolve_data_dir(None, env={"LOCALAPPDATA": str(tmp_path)})
-    assert Path(got) == (tmp_path / "videoRAG").resolve()
+    assert got != "/data"
+    assert got.endswith("videoRAG")
 
 
 def test_resolve_data_dir_posix_default(monkeypatch):
