@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -51,6 +51,9 @@ class Video(TimestampMixin, Base):
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="video", lazy="selectin")
     note: Mapped["Note | None"] = relationship(back_populates="video", lazy="selectin")
     comments: Mapped[list["Comment"]] = relationship(back_populates="video")
+    collections: Mapped[list["Collection"]] = relationship(
+        secondary="video_collections", back_populates="videos"
+    )
 
 
 class Task(TimestampMixin, Base):
@@ -127,6 +130,39 @@ class Comment(TimestampMixin, Base):
     published_at: Mapped[str | None] = mapped_column(default=None)  # ISO8601
 
     video: Mapped[Video] = relationship(back_populates="comments", lazy="selectin")
+
+
+class Collection(TimestampMixin, Base):
+    """视频收藏夹：给「视频收藏」页做分类管理。
+
+    - 一个视频可属于多个收藏夹（多对多，见 VideoCollection）；
+    - 导入的视频自动进入 `is_default=True` 的那个（默认收藏夹），
+      之后可再手动加入其它收藏夹；
+    - 默认收藏夹不允许删除（改名可以），保证总有地方落新导入的视频。
+    """
+
+    __tablename__ = "collections"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(unique=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(default=0)
+
+    videos: Mapped[list["Video"]] = relationship(
+        secondary="video_collections", back_populates="collections"
+    )
+
+
+class VideoCollection(Base):
+    """视频 ↔ 收藏夹 关联表（显式映射类：需要记录加入时间，且避免隐式懒加载）。"""
+
+    __tablename__ = "video_collections"
+
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), primary_key=True)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("collections.id"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class QueryHistory(TimestampMixin, Base):

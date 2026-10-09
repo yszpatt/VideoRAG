@@ -11,7 +11,7 @@ from sqlalchemy.orm import noload
 from app.core.notes import strip_quotes_section
 from app.core.progress import progress_for_video
 from app.core.video_service import SubmitError, submit_video_url
-from app.models import Chunk, Comment, Note, Segment, Task, Video
+from app.models import Chunk, Collection, Comment, Note, Segment, Task, Video, VideoCollection
 
 router = APIRouter(prefix="/api/videos")
 
@@ -37,8 +37,11 @@ def _serialize_video(
     has_segments: bool | None = None,
     has_note: bool | None = None,
     has_chunks: bool | None = None,
+    collection_ids: list[str] | None = None,
 ) -> dict:
     return {
+        # 所属收藏夹（多对多；默认收藏夹始终在内 —— 见 /api/collections 的语义说明）
+        "collection_ids": collection_ids or [],
         "id": v.id,
         "platform": v.platform,
         "url": v.url,
@@ -117,22 +120,52 @@ async def submit_video(req: SubmitVideoRequest, request: Request):
     return SubmitVideoResponse(video_id=video_id, status=status)
 
 
+async def _collection_map(session, video_ids: list[str]) -> dict[str, list[str]]:
+    """批量取「视频 → 收藏夹 id 列表」，避免逐条查询。"""
+    if not video_ids:
+        return {}
+    rows = await session.execute(
+        select(VideoCollection.video_id, VideoCollection.collection_id).where(
+            VideoCollection.video_id.in_(video_ids)
+        )
+    )
+    out: dict[str, list[str]] = {}
+    for vid, cid in rows.all():
+        out.setdefault(vid, []).append(cid)
+    return out
+
+
 @router.get("")
-async def list_videos(request: Request, limit: int = 50):
+async def list_videos(request: Request, limit: int = 50, collection_id: str | None = None):
+    """视频列表；``collection_id`` 给出时只返回该收藏夹内的视频。
+
+    过滤放在服务端：前端只按 3s 轮询拉一页（limit 默认 50），如果改成前端过滤，
+    收藏夹里超过一页的视频会「查不全」。
+    """
     sf = request.app.state.session_factory
     async with sf() as s:
-        rows = (
-            await s.execute(
-                select(Video)
-                .options(*[noload(getattr(Video, r)) for r in _HEAVY_RELATIONS])
-                .order_by(Video.created_at.desc())
-                .limit(limit)
+        stmt = (
+            select(Video)
+            .options(*[noload(getattr(Video, r)) for r in _HEAVY_RELATIONS])
+            .order_by(Video.created_at.desc())
+            .limit(limit)
+        )
+        if collection_id:
+            stmt = stmt.where(
+                Video.id.in_(
+                    select(VideoCollection.video_id).where(
+                        VideoCollection.collection_id == collection_id
+                    )
+                )
             )
-        ).scalars().all()
+        rows = (await s.execute(stmt)).scalars().all()
         flags = await _failed_flags(s, rows)
+        cmap = await _collection_map(s, [v.id for v in rows])
     thumb_dir = _thumb_dir(request)
     return [
-        _serialize_video(v, thumb_dir, **flags.get(v.id, {}))
+        _serialize_video(
+            v, thumb_dir, collection_ids=cmap.get(v.id, []), **flags.get(v.id, {})
+        )
         for v in rows
     ]
 
@@ -152,6 +185,7 @@ async def get_video(video_id: str, request: Request):
         if v is None:
             raise HTTPException(404, "video not found")
         flags = await _failed_flags(s, [v])
+        cmap = await _collection_map(s, [v.id])
         comments = (
             await s.execute(
                 select(Comment)
@@ -161,7 +195,9 @@ async def get_video(video_id: str, request: Request):
             )
         ).scalars().all()
         return {
-            **_serialize_video(v, thumb_dir, **flags.get(v.id, {})),
+            **_serialize_video(
+                v, thumb_dir, collection_ids=cmap.get(v.id, []), **flags.get(v.id, {})
+            ),
             "comments": [
                 {
                     "author": c.author,
@@ -194,6 +230,64 @@ async def get_note(video_id: str, request: Request):
             "glossary": note.glossary or [],
             "markdown": strip_quotes_section(note.markdown),
         }
+
+
+class VideoCollectionsBody(BaseModel):
+    collection_ids: list[str]
+
+
+@router.put("/{video_id}/collections")
+async def set_video_collections(
+    video_id: str, req: VideoCollectionsBody, request: Request
+):
+    """设置视频所属的收藏夹（整表替换）。
+
+    **默认收藏夹会被自动保留**：即使前端没传，也会加回来 —— 导入的视频自动归它，
+    用户只能再往别的夹里加，不能移出去。这样保证每个视频总有归处。
+    """
+    sf = request.app.state.session_factory
+    async with sf() as s:
+        video = await s.get(Video, video_id)
+        if video is None:
+            raise HTTPException(404, "video not found")
+        default = (
+            await s.execute(select(Collection).where(Collection.is_default.is_(True)))
+        ).scalars().first()
+        known = {
+            cid
+            for (cid,) in (
+                await s.execute(select(Collection.id))
+            ).all()
+        }
+        unknown = [cid for cid in req.collection_ids if cid not in known]
+        if unknown:
+            raise HTTPException(422, f"收藏夹不存在：{', '.join(unknown)}")
+
+        desired = set(req.collection_ids)
+        if default is not None:
+            desired.add(default.id)
+
+        current = {
+            cid
+            for (cid,) in (
+                await s.execute(
+                    select(VideoCollection.collection_id).where(
+                        VideoCollection.video_id == video_id
+                    )
+                )
+            ).all()
+        }
+        for cid in current - desired:
+            await s.execute(
+                VideoCollection.__table__.delete().where(
+                    VideoCollection.video_id == video_id,
+                    VideoCollection.collection_id == cid,
+                )
+            )
+        for cid in desired - current:
+            s.add(VideoCollection(video_id=video_id, collection_id=cid))
+        await s.commit()
+    return {"video_id": video_id, "collection_ids": sorted(desired)}
 
 
 @router.delete("/{video_id}")
