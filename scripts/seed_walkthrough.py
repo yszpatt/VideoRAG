@@ -6,9 +6,9 @@
 query_history 与 thumbnails/ 缓存封面。再次运行会先清理 wt- 前缀数据再重灌。
 """
 import asyncio
+import struct
 import sys
 import zlib
-import struct
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 

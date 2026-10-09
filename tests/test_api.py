@@ -4,9 +4,11 @@ from app.config import Settings
 from app.core.fetchers.base import FetchedMedia
 from app.core.transcribers.base import Segment, Transcript
 from app.main import create_app
+
 # 注意：ORM 的 Segment 必须别名导入，否则会遮蔽上面的转写器数据类 Segment，
 # 导致 make_fake_components 的 Segment(0, 1, "hi") 以位置参数构造 ORM 模型而报错
-from app.models import Chunk, Comment, Note, Segment as OrmSegment, Task, Video
+from app.models import Chunk, Comment, Note, Task, Video
+from app.models import Segment as OrmSegment
 
 
 def make_fake_components():

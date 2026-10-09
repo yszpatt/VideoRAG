@@ -1,11 +1,17 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 
 from app.config import Settings
 from app.db import init_db, make_session_factory
-from app.mcp_server import _ask, _get_note, _get_transcript, _list_videos, _search, _submit
-from app.mcp_server import mcp_http_middleware
+from app.mcp_server import (
+    _ask,
+    _get_note,
+    _get_transcript,
+    _list_videos,
+    _search,
+    _submit,
+    mcp_http_middleware,
+)
 from app.models import Note, Segment, Video
 
 

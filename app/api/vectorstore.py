@@ -84,7 +84,7 @@ async def start_rebuild(request: Request):
             st["state"], st["done"] = "done", n
         except asyncio.CancelledError:
             st["state"], st["error"] = "failed", "任务已取消"
-        except Exception as e:  # noqa: BLE001（重建失败需完整回显给前端）
+        except Exception as e:  # noqa: BLE001  重建失败需完整回显给前端
             st["state"], st["error"] = "failed", f"{type(e).__name__}: {e}"
             log.exception("vectorstore rebuild failed")
         finally:

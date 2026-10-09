@@ -8,8 +8,8 @@ import asyncio
 from sqlalchemy import select
 
 from app.config import Settings
-from app.db import make_session_factory
 from app.core.fetchers.ytdlp import fetch_metadata
+from app.db import make_session_factory
 from app.jobs.pipeline import _save_metadata
 from app.models import Video
 

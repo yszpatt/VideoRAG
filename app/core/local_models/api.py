@@ -58,7 +58,7 @@ def _enrich_embedding_compat(request: Request, models: list[dict]) -> None:
     try:
         store_meta = vs.get_model_meta() if vs is not None else None
         store_rows = vs.count_rows() if vs is not None else 0
-    except Exception:  # noqa: BLE001（测试替身缺方法时静默降级）
+    except Exception:  # noqa: BLE001  测试替身缺方法时静默降级
         store_meta, store_rows = None, 0
     try:
         fp = dict(embedder.fingerprint) if embedder is not None else {}
@@ -112,7 +112,7 @@ async def probe_health(kind: str, request: Request):
                 "endpoint": endpoint, "status": r.status_code,
                 "latency_ms": round((time.monotonic() - t0) * 1000),
             }
-        except Exception as e:  # noqa: BLE001（连接拒绝/超时 → 服务未起）
+        except Exception as e:  # noqa: BLE001  连接拒绝/超时 → 服务未起
             return {
                 "kind": kind, "ok": False, "endpoint": endpoint,
                 "error": f"{type(e).__name__}: {e}",

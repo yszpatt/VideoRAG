@@ -1,7 +1,6 @@
 import pytest
 
 from app.core.fetchers.base import FetchedMedia
-from app.core.transcribers.base import Segment, Transcript
 from app.core.transcribers.subtitle import SubtitleTranscriber
 from app.core.transcribers.whisper import WhisperTranscriber
 

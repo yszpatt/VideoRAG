@@ -429,7 +429,8 @@ def _speech_fixtures():
 async def test_process_video_visual_always_persists_source(tmp_path, monkeypatch):
     from app.jobs import pipeline as pl
     from app.jobs.pipeline import process_video
-    from app.models import Chunk, Segment as ORMSegment, Video
+    from app.models import Chunk, Video
+    from app.models import Segment as ORMSegment
 
     engine, factory = await _prepare_video(tmp_path)
     fetchers, transcribers = _speech_fixtures()
@@ -464,7 +465,8 @@ async def test_process_video_visual_always_persists_source(tmp_path, monkeypatch
 async def test_process_video_visual_off_does_not_trigger(tmp_path, monkeypatch):
     from app.jobs import pipeline as pl
     from app.jobs.pipeline import process_video
-    from app.models import Segment as ORMSegment, Video
+    from app.models import Segment as ORMSegment
+    from app.models import Video
 
     engine, factory = await _prepare_video(tmp_path, "v2")
     fetchers, transcribers = _speech_fixtures()
@@ -491,7 +493,8 @@ async def test_process_video_visual_failure_is_isolated(tmp_path, monkeypatch):
     """视觉层抛错 → 只记日志，视频仍 done，原有转写照常落库。"""
     from app.jobs import pipeline as pl
     from app.jobs.pipeline import process_video
-    from app.models import Segment as ORMSegment, Video
+    from app.models import Segment as ORMSegment
+    from app.models import Video
 
     engine, factory = await _prepare_video(tmp_path, "v3")
     fetchers, transcribers = _speech_fixtures()

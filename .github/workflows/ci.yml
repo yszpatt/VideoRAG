@@ -1,0 +1,59 @@
+name: ci
+
+# 代码门禁：lint + 单元测试。与 verify-docker（容器行为回归）、build-windows
+# （手动打包）分工不同——本工作流是**每次改动都会跑**的那一道，回答两个问题：
+#   1. 静态问题（未定义名/未使用导入变量/导入顺序）——ruff
+#   2. 行为是否被改坏——pytest 全量单测
+#
+# 为什么单独建一个工作流：verify-docker 只 build 镜像 + 断言配置，镜像里没装
+# dev extra（pytest 根本不存在）；跑单测的 build-windows 是手动触发。也就是说
+# 在此之前，push/PR 都不会跑单测，app/** 的改动没有任何自动化兜底。
+#
+# 环境刻意对齐 Dockerfile / build-windows 的 Python 3.11，避免「本机 3.13+ 过、
+# 打包环境挂」这类版本漂移（曾出现 pathlib 平台分支断言只在 3.11 上成立的用例）。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "scripts/**"
+      - "deploy/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # RapidOCR 依赖的 opencv 需要 libGL / libglib（与 Dockerfile 同样的原因：
+      # slim/裸 runner 默认没有，缺库会让 cv2 导入直接失败）。
+      - name: 系统库（opencv 运行时）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+
+      - name: 安装依赖（含 dev：pytest + ruff）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff（lint）
+        run: ruff check app tests scripts deploy/asr
+
+      - name: 单元测试
+        run: python -m pytest -q

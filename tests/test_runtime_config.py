@@ -1,4 +1,3 @@
-import pytest
 
 from app.config import Settings
 from app.core.runtime_config import load_runtime_env, save_runtime_env

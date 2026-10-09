@@ -9,17 +9,17 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.config import Settings
+from app.core.fetchers.base import FetchedMedia
 from app.core.fetchers.ytdlp import (
     FetchMetadataError,
     _normalize_metadata,
     fetch_metadata,
 )
+from app.core.transcribers.base import Segment, Transcript
 from app.db import init_db
 from app.jobs.pipeline import _save_metadata, process_video
 from app.main import create_app
 from app.models import Comment, Video
-from app.core.fetchers.base import FetchedMedia
-from app.core.transcribers.base import Segment, Transcript
 
 BILI_INFO = {
     "id": "BV1xx",

@@ -10,7 +10,7 @@ Embedding = fastembed bge-small-zh-v1.5（HF hub 缓存结构，snapshot 下载�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ---- 常量 ----
 MODELSCOPE_API = "https://modelscope.cn/api/v1/models/{repo}/repo/files"

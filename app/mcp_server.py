@@ -1,10 +1,15 @@
+from typing import TYPE_CHECKING
+
+from sqlalchemy import select
+
 from app.core.notes import strip_quotes_section
 from app.core.rag.qa import answer_question
 from app.core.rag.retriever import RetrievalParams, retrieve
 from app.core.video_service import submit_video_url
 from app.models import Note, Segment, Video
 
-from sqlalchemy import select
+if TYPE_CHECKING:  # 仅供类型标注：mcp 在函数内延迟导入以加快启动
+    from mcp.server.fastmcp import FastMCP
 
 
 def _retrieval_params(components: dict) -> RetrievalParams:

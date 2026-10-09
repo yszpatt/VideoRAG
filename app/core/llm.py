@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 
 from openai import APIError, AsyncOpenAI
 

@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import Settings
 from app.core.embed.embedder import Embedder
-from app.core.embed.rebuild import load_rows, reembed  # noqa: F401（test_reembed_script 按名访问）
+from app.core.embed.rebuild import load_rows, reembed  # noqa: F401  test_reembed_script 按名访问
 from app.core.vector_store import VectorStore
 
 

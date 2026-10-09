@@ -2,7 +2,6 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.core.fetchers.base import FetchedMedia
 from app.core.fetchers.ytdlp import FetchError, YtdlpFetcher, detect_platform, parse_subtitle_file
 
 

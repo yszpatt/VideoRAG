@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import noload
 
-from app.core.fetchers.ytdlp import detect_platform
 from app.core.notes import strip_quotes_section
 from app.core.progress import progress_for_video
 from app.core.video_service import SubmitError, submit_video_url

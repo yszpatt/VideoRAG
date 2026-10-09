@@ -211,7 +211,6 @@ async def retrieve(
         fts_hits = []  # 无 FTS 索引或全文检索不可用时降级为纯向量
 
     # 溯源信息：每个 key 的向量相似度、是否被全文路命中（词法佐证）
-    vec_keys = {r.get("id", "") for r in vec_hits if r.get("id")}
     fts_keys = {r.get("id", "") for r in fts_hits if r.get("id")}
     sims = {r.get("id", ""): _vec_sim(r) for r in vec_hits if r.get("id")}
 

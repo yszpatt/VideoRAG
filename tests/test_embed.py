@@ -1,4 +1,3 @@
-import asyncio
 
 from app.core.embed.embedder import Embedder
 from app.core.vector_store import VectorStore

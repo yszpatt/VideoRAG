@@ -1,4 +1,4 @@
-from app.core.embed.chunker import Chunk, chunk_segments
+from app.core.embed.chunker import chunk_segments
 from app.core.transcribers.base import Segment
 
 

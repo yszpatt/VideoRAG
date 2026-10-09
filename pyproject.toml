@@ -30,6 +30,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    # lint（CI 与本机共用同一份配置，见下方 [tool.ruff]）
+    "ruff>=0.16",
 ]
 # Windows 桌面包专用（Docker 镜像不装，保持主镜像轻量）：
 # - sherpa-onnx：进程内 SenseVoice 推理（ASR_LOCAL_BACKEND=inproc）
@@ -44,6 +46,18 @@ desktop = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+# 与项目既有排版一致（注释里长句较多，不强求 88）
+line-length = 100
+# 与 Dockerfile / Windows 打包工作流对齐的运行时下限
+target-version = "py311"
+
+[tool.ruff.lint]
+# 保守起步：只拦「真会出错」的问题——未定义名/未使用导入与变量/导入排序。
+# 刻意不启用 E501（行宽）与 ruff-format，避免一次性重排全库、把历史 diff 淹没。
+# 需要更严时逐条加 select（如 B / SIM / RUF），并同步修存量。
+select = ["E4", "E7", "E9", "F", "I"]
 
 [build-system]
 requires = ["hatchling"]

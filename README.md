@@ -379,6 +379,7 @@ B站对数据中心 IP 有风控。把浏览器 cookie 导出为 `/data/cookies/
 uv venv .venv
 uv pip install -p .venv/bin/python -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
 .venv/bin/python -m pytest                # 运行测试
+.venv/bin/ruff check app tests scripts deploy/asr   # 代码检查（与 CI 同一份配置）
 .venv/bin/python -m uvicorn app.main:app --port 8566
 
 cd web
@@ -386,6 +387,9 @@ npm install --registry=https://registry.npmmirror.com
 npm run dev                                # 前端开发服务器（/api 代理到 8566）
 npm run build                              # 构建产物 web/dist，由后端托管
 ```
+
+> 提交前建议本地跑上面两条（pytest + ruff）：CI 的 `ci` 工作流对每次 push / PR 都执行
+> 同样的两条命令，Python 版本对齐 3.11（与 Dockerfile、Windows 打包一致）。
 
 本地免配置演示（无需 key / 模型 / 外网）：
 

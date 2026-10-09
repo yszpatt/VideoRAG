@@ -95,7 +95,6 @@ async def get_settings(request: Request):
     for group, keys in GROUPS.items():
         item = {}
         for key in keys:
-            env_name = key
             attr = key.lower()
             value = getattr(s, attr, "")
             if key.endswith("_API_KEY") or key in _SECRET_KEYS:
@@ -328,7 +327,7 @@ async def _try_get(url: str, api_key: str) -> dict:
             "latency_ms": round((time.monotonic() - t0) * 1000),
             "text": r.text[:200_000],
         }
-    except Exception as e:  # noqa: BLE001（连接拒绝/超时 → 服务未起/地址错）
+    except Exception as e:  # noqa: BLE001  连接拒绝/超时 → 服务未起/地址错
         return {
             "url": url, "reachable": False,
             "error": f"{type(e).__name__}: {e}",

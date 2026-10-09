@@ -3,11 +3,9 @@
 对应 docs/plans/2026-09-03-local-fallback-design.md §3.1/§3.2/§5.1。
 """
 
-import pytest
 
 from app.config import Settings
 from app.core.factory import build_embedder, build_transcribers
-
 
 # ---------- config 档位判定 ----------
 

@@ -27,7 +27,6 @@ from app.core.local_models.manager import (
     ModelManager,
 )
 
-
 # ========== registry ==========
 
 def test_registry_specs():

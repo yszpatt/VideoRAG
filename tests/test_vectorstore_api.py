@@ -92,7 +92,6 @@ async def test_rebuild_empty_db_writes_fingerprint(app, client):
 
 async def test_search_incompatible_returns_readable_409(app, client):
     """换模型后检索：409 + 中文指引（模型已切换），不再是裸 500。"""
-    s = _settings_of(app)
     vs = app.state.components["vector_store"]
     # 旧库：4 维向量 + 远程 bge-m3 指纹
     vs.add(

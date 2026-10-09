@@ -1,4 +1,3 @@
-import pytest
 
 
 async def test_get_settings_defaults(client):
@@ -90,9 +89,10 @@ async def test_put_settings_persists_and_masks(client, tmp_path):
 async def test_put_settings_mask_placeholder_keeps_key(client, monkeypatch, tmp_path):
     """PUT 传掩码占位 **** / null 时不覆盖已配置字段（null=未提供）。"""
     monkeypatch.setenv("LLM_API_KEY", "sk-abcdefghijklmnop")
+    from httpx import ASGITransport, AsyncClient
+
     from app.config import Settings
     from app.main import create_app
-    from httpx import ASGITransport, AsyncClient
 
     settings = Settings(_env_file=None, data_dir=str(tmp_path))
     app = create_app(settings=settings)

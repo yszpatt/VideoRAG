@@ -2,10 +2,10 @@
 
 from httpx import ASGITransport, AsyncClient
 
+from app.config import Settings
 from app.core.progress import compute_progress
 from app.main import create_app
 from app.models import Chunk, Note, Segment, Video
-from app.config import Settings
 
 STAGE_KEYS = ["queued", "fetching", "transcribing", "noting", "embedding"]
 

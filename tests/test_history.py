@@ -1,6 +1,5 @@
 """E5 / M3：历史提问与检索记录——写入/去重/淘汰/API。"""
 
-import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 

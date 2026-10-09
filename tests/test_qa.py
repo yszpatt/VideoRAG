@@ -1,4 +1,4 @@
-from app.core.rag.qa import Answer, answer_question, build_qa_prompt
+from app.core.rag.qa import answer_question, build_qa_prompt
 from app.core.rag.retriever import Hit
 
 
