@@ -388,6 +388,31 @@ B站对数据中心 IP 有风控。把浏览器 cookie 导出为 `/data/cookies/
 **Q：数据存在哪里？**
 全部在挂载卷 `/data` 下：SQLite（元数据/任务）、LanceDB（向量）、notes（markdown）、models（模型缓存）。删除容器不丢数据，备份该目录即可。唯一例外是**已下载媒体归档**（可选功能，`MEDIA_SAVE_DIR`）：默认在容器内 `/media`，对应宿主 `./downloads`，需单独备份。
 
+## 构建加速与抗中断（可选，推荐国内网络）
+
+镜像构建要装 ~350MB 的 wheel 依赖，在慢/抖动的镜像源上容易「下一半断掉、重来全白下」。
+项目提供了可续传的本地 wheel 缓存：
+
+```bash
+scripts/prefetch_wheels.sh          # 反复尝试直到下完（中断后重跑即续传）
+docker compose build videorag      # 依赖阶段 --no-index，只吃本地 wheel：构建期零网络
+docker compose up -d videorag
+```
+
+- 缓存落在 `packaging/wheels/`（已 gitignore）；清空后重建即可重新预取；
+- 换源：`.env` 里 `PIP_INDEX_URL` / `NPM_REGISTRY`（compose 会把它们透传给 build arg）；
+  实测同一时刻 pypi.org 约 1.3 MB/s、某国内镜像 0 MB/s，按自己网络选；
+- 基础镜像拉不动（如镜像加速站返回 403）时，可从其它可达的公共镜像站拉下再打回标准 tag：
+
+```bash
+docker pull docker.1ms.run/library/python:3.11-slim
+docker tag docker.1ms.run/library/python:3.11-slim python:3.11-slim
+docker pull docker.1ms.run/library/node:20-alpine
+docker tag docker.1ms.run/library/node:20-alpine node:20-alpine
+```
+
+- 只改前端时构建很快：前端产物在依赖层之后拷贝，依赖层直接命中缓存。
+
 ## 本地开发
 
 ```bash

@@ -34,3 +34,7 @@ outputs/
 build/
 # 构建时下载的 ffmpeg 等外部二进制（体积大且带 GPL，不入库，由 packaging/vendor-ffmpeg.ps1 获取）
 packaging/vendor/
+
+# 预下载的 Python wheel 缓存（scripts/prefetch_wheels.sh 生成；体积大、可重建）
+packaging/wheels/*
+!packaging/wheels/.gitkeep
