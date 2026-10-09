@@ -1647,7 +1647,8 @@ kbd {
 .history-cards {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 96px);
+  /* zoom 子树里 vh 会被放大 --ui-scale 倍，按 --ui-inv 折算回真实视口高度 */
+  max-height: calc(100dvh * var(--ui-inv) - 96px);
 }
 .aside-head {
   display: flex;
@@ -2596,7 +2597,7 @@ kbd {
     max-height: none;
   }
   .history-cards-list {
-    max-height: 46vh;
+    max-height: calc(46dvh * var(--ui-inv));
   }
 }
 
@@ -2697,18 +2698,18 @@ kbd {
 }
 .modal-backdrop-sheet .modal-sheet {
   width: min(760px, 100%);
-  max-height: calc(100dvh - 48px);
+  /* 相对「已覆盖视口」的 fixed 弹层算高度，**不要用 100dvh**：
+     祖先 .app-shell 有 zoom: var(--ui-scale)（1.3），zoom 子树里的 vh/dvh 会被放大
+     同样倍数 —— 实测 657px 视口下 max-height: calc(100dvh - 48px) 渲染成 792px，
+     弹层比屏幕还高：底部内容被切掉，往上滚又把标题/头部一起滚出视野。
+     用 100%（= 弹层内容盒高度，已经等于视口）就与 zoom 无关。 */
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-}
-@supports not (height: 100dvh) {
-  .modal-backdrop-sheet .modal-sheet {
-    max-height: calc(100vh - 48px);
-  }
 }
 .modal-backdrop-sheet .sheet-head {
   flex: none;
@@ -3200,7 +3201,7 @@ kbd {
   .hist-side {
     border-right: none;
     border-bottom: 1px solid var(--border);
-    max-height: 34vh;
+    max-height: calc(34dvh * var(--ui-inv));
   }
   .hist-main {
     padding: 16px 16px 32px;
