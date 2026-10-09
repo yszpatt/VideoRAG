@@ -26,8 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /srv/asr
 
+# 索引源可经 --build-arg 覆盖（同主镜像）；带重试以穿过镜像源的偶发 SSL 抖动
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 60 -i "$PIP_INDEX_URL" -r requirements.txt
 
 COPY server.py ./
 

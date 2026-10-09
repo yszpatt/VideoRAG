@@ -1,8 +1,11 @@
 # ---- 阶段 1：前端构建 ----
 FROM node:20-alpine AS web
 WORKDIR /web
+# 镜像源可经 --build-arg 覆盖：国内默认 npmmirror，CI / 海外可用官方源。
+# 带重试：这两个源在国内/代理环境下偶发 SSL 中断，一次失败就整个构建失败太脆。
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY web/package.json web/package-lock.json ./
-RUN npm ci --registry=https://registry.npmmirror.com
+RUN npm ci --registry="$NPM_REGISTRY" --fetch-retries=5 --fetch-retry-maxtimeout=120000
 COPY web ./
 RUN npm run build
 
@@ -22,6 +25,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/app \
     XDG_CACHE_HOME=/tmp/.cache
+
+# 包索引可经 --build-arg 覆盖：国内默认清华源，CI / 海外可用 https://pypi.org/simple。
+# --retries/--timeout：实测镜像源会偶发 `SSLError: record layer failure`，
+# 默认 5 次重试 + 15s 超时不足以穿过抖动，直接导致整个镜像构建失败。
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 # /data 预创建并归属 app：具名/匿名卷首次初始化会继承该属主，
 # 未绑定宿主目录时也能以非 root 写入（绑定挂载则以宿主目录属主为准）。
@@ -53,8 +61,7 @@ COPY --from=web /web/dist ./web/dist
 # 统一补「他人可读 + 目录可进入」，不依赖检出时的 umask；属主保持 root（app 用户不该改自己的代码）。
 RUN chmod -R a+rX /srv/app
 
-# 国内镜像加速
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple .
+RUN pip install --no-cache-dir --retries 10 --timeout 60 -i "$PIP_INDEX_URL" .
 
 # 以非 root 用户运行（UID/GID 与宿主一致，见上方构建参数）
 USER app

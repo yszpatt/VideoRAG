@@ -36,6 +36,10 @@ services:
       args:
         APP_UID: "${VIDEORAG_UID:-1000}"
         APP_GID: "${VIDEORAG_GID:-1000}"
+        # 包索引源：默认沿用国内镜像（与原 Dockerfile 一致）。镜像源会偶发
+        # SSL 断流导致构建失败，可在 .env 里换源（如阿里云 / 官方源）而不改本文件。
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmmirror.com}"
     image: videorag:latest
     container_name: videorag
     restart: unless-stopped
@@ -122,6 +126,7 @@ services:
       args:
         APP_UID: "${VIDEORAG_UID:-1000}"
         APP_GID: "${VIDEORAG_GID:-1000}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
     image: videorag-asr:latest
     container_name: videorag-asr
     profiles: ["local-asr"]
