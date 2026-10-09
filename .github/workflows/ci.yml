@@ -55,5 +55,18 @@ jobs:
       - name: Ruff（lint）
         run: ruff check app tests scripts deploy/asr
 
+      # 容器以非 root 的 app 用户运行，而 COPY 会把构建上下文里的文件模式原样带进镜像
+      # （属主是 root）。一个 0600 的源文件就足以让容器起不来：PermissionError:
+      # .../app/api/xxx.py —— 已真实踩到（本地 umask 收紧后新建的文件即 0600）。
+      # Dockerfile 里另有 chmod -R a+rX 兜底，这里再守一道，避免依赖单点。
+      - name: 构建上下文文件权限自检
+        run: |
+          bad=$(find app deploy/asr \( -type f ! -perm -o+r -o -type d ! -perm -o+x \) -print)
+          if [ -n "$bad" ]; then
+            echo "::error::以下文件/目录对容器内非 root 用户不可读，请 chmod 644/755："
+            echo "$bad"
+            exit 1
+          fi
+
       - name: 单元测试
         run: python -m pytest -q

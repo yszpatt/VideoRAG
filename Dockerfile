@@ -47,6 +47,12 @@ COPY pyproject.toml ./
 COPY app ./app
 COPY --from=web /web/dist ./web/dist
 
+# COPY 会原样保留构建上下文里的文件模式（不改权限），而运行期是**非 root 的 app 用户**，
+# 文件属主在镜像里是 root：只要有一个源文件是 0600，容器就会起不来，报
+# `PermissionError: .../app/api/xxx.py`（已真实踩到：本地 umask 收紧后新建的文件即 0600）。
+# 统一补「他人可读 + 目录可进入」，不依赖检出时的 umask；属主保持 root（app 用户不该改自己的代码）。
+RUN chmod -R a+rX /srv/app
+
 # 国内镜像加速
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple .
 
