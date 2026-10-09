@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api.cookies import router as cookies_router
 from app.api.history import router as history_router
+from app.api.logs import router as logs_router
 from app.api.prompts import router as prompts_router
 from app.api.search import router as search_router
 from app.api.settings import router as settings_router
@@ -15,6 +16,7 @@ from app.core.factory import build_embedder, build_llm, build_transcribers
 from app.core.fetchers.ytdlp import YtdlpFetcher
 from app.core.local_models.api import router as models_router
 from app.core.local_models.manager import ModelManager, apply_hf_endpoint
+from app.core.logbuf import install_log_buffer
 from app.core.media_archive import ensure_archive_dir
 from app.core.prompts import PromptRegistry
 from app.core.queue import Queue, TaskHandler, start_workers
@@ -36,6 +38,9 @@ def create_app(
     vector_store=None,
     static_dir: str | None = None,
 ) -> FastAPI:
+    # 日志环形缓冲：尽早安装，让启动阶段的日志也进缓冲区（设置页「日志」页签读它）
+    install_log_buffer()
+
     settings = settings or Settings()
     # 在线修改的运行时配置（runtime.env）优先级最高
     runtime = load_runtime_env(settings.data_dir)
@@ -161,6 +166,7 @@ def create_app(
     app.include_router(prompts_router)
     app.include_router(history_router)
     app.include_router(cookies_router)
+    app.include_router(logs_router)
 
     @app.get("/health")
     async def health() -> dict:

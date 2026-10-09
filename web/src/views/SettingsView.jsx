@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { clearHistory, getSettings, probeService, saveSettings } from "../api.js";
 import ConfirmDialog from "../components/ConfirmDialog.jsx";
 import CookiePanel from "../components/CookiePanel.jsx";
+import LogPanel from "../components/LogPanel.jsx";
 import LocalModelsPanel from "../components/LocalModelsPanel.jsx";
 import PromptTab from "../components/PromptTab.jsx";
 
@@ -63,7 +64,19 @@ const TABS = [
   { key: "models", label: "本地模型" },
   { key: "cookies", label: "Cookie / 登录" },
   { key: "prompts", label: "提示词" },
+  { key: "logs", label: "日志" },
 ];
+
+// 每个页签的副标题（原来是嵌套三元，加到第 5 个页签后改成查表，避免继续套娃）
+const TAB_DESC = {
+  services: "在线调整模型服务，保存后立即生效（写入运行时配置，重启不丢失）",
+  models:
+    "本地降级模型（ASR / Embedding）的下载、手动指定与连通性检查；未配置远程服务参数时自动回落本地",
+  cookies:
+    "各平台登录 cookie（小红书 / 抖音必需，B 站 / YouTube 可选）：粘贴或导入文件，保存即生效、无需重启",
+  prompts: "自定义笔记与问答的提示词，保存后下一次生成 / 提问即生效",
+  logs: "服务进程的运行日志：级别 / 关键词过滤、自动刷新、一键复制，排查抓取与模型问题用",
+};
 
 // 检索策略参数（数值型，后端 settings API retrieval 组）
 const RETRIEVAL_FIELDS = [
@@ -414,13 +427,7 @@ export default function SettingsView() {
           <div>
             <h2 className="panel-title">设置</h2>
             <p className="panel-sub">
-              {tab === "services"
-                ? "在线调整模型服务，保存后立即生效（写入运行时配置，重启不丢失）"
-                : tab === "models"
-                  ? "本地降级模型（ASR / Embedding）的下载、手动指定与连通性检查；未配置远程服务参数时自动回落本地"
-                  : tab === "cookies"
-                    ? "各平台登录 cookie（小红书 / 抖音必需，B 站 / YouTube 可选）：粘贴或导入文件，保存即生效、无需重启"
-                    : "自定义笔记与问答的提示词，保存后下一次生成 / 提问即生效"}
+              {TAB_DESC[tab] || ""}
             </p>
           </div>
         </div>
@@ -440,6 +447,8 @@ export default function SettingsView() {
         {tab === "prompts" && <PromptTab />}
 
         {tab === "cookies" && <CookiePanel />}
+
+        {tab === "logs" && <LogPanel />}
 
         {tab === "models" && !loading && (
           <>

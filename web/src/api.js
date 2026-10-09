@@ -124,6 +124,16 @@ export const importCookieFromBrowser = (platform, browser) =>
     body: JSON.stringify({ browser }),
   });
 
+// ---- 运行日志（设置页「日志」页签；读的是服务进程内的环形缓冲）----
+export const getLogs = ({ limit = 300, level = "", q = "" } = {}) => {
+  const p = new URLSearchParams({ limit: String(limit) });
+  if (level) p.set("level", level);
+  if (q) p.set("q", q);
+  return request(`/api/logs?${p.toString()}`);
+};
+
+export const clearLogs = () => request("/api/logs", { method: "DELETE" });
+
 export const listHistory = (kind, limit = 20) =>
   request(`/api/history?kind=${kind}&limit=${limit}`);
 
