@@ -283,21 +283,40 @@ function Shell() {
     [videos],
   );
 
-  // 导入视频：弹窗输入链接 → 确认后面板关闭，进度在「视频收藏」页与侧边栏显示
+  // 导入视频：支持一次多条（弹窗里每行一个链接）→ 逐条提交并汇总成败，
+  // 部分失败时保留成功的结果并如实汇报，全部失败则留在弹窗里方便改。
   const onImportVideo = useCallback(
-    async (url) => {
+    async (urls) => {
+      const list = Array.isArray(urls) ? urls : [urls];
+      if (!list.length) return;
       setImporting(true);
-      try {
-        await submitVideo(url);
-        push("已提交，开始处理", "success");
-        setShowImport(false);
-        await refreshVideos(false);
-        go("library"); // 跳到视频收藏看处理进度
-      } catch (e) {
-        push(`提交失败：${e.message}`, "error");
-      } finally {
-        setImporting(false);
+      const ok = [];
+      const failed = [];
+      for (const u of list) {
+        try {
+          await submitVideo(u);
+          ok.push(u);
+        } catch (e) {
+          failed.push(e.message);
+        }
       }
+      setImporting(false);
+
+      if (!ok.length) {
+        push(`提交失败：${failed[0] || "未知错误"}`, "error");
+        return; // 弹窗保持打开，便于修改链接
+      }
+      if (failed.length) {
+        push(`已提交 ${ok.length} 个，失败 ${failed.length} 个：${failed[0]}`, "error");
+      } else {
+        push(
+          ok.length === 1 ? "已提交，开始处理" : `已提交 ${ok.length} 个视频，开始处理`,
+          "success",
+        );
+      }
+      setShowImport(false);
+      await refreshVideos(false);
+      go("library"); // 跳到视频收藏看处理进度
     },
     [push, refreshVideos],
   );

@@ -3448,3 +3448,125 @@ select.input {
 .cookie-browser-select {
   max-width: 220px;
 }
+
+/* ---------- 导入视频弹窗：更大的多行输入 ---------- */
+.modal-import {
+  width: min(640px, 100%);
+}
+
+.import-textarea {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.import-hint {
+  margin: 6px 0 0;
+}
+
+/* ---------- 设置页 · 日志 ---------- */
+.log-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.log-level {
+  width: 150px;
+}
+
+.log-search {
+  flex: 1;
+  min-width: 160px;
+  max-width: 320px;
+}
+
+.log-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.log-box {
+  max-height: 460px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+}
+
+.log-ts {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.log-level-tag {
+  flex: none;
+  width: 62px;
+  color: var(--text-faint);
+}
+
+.log-logger {
+  flex: none;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+}
+
+.log-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+
+.log-line.is-warn .log-level-tag,
+.log-line.is-warn .log-msg {
+  color: var(--warn);
+}
+
+.log-line.is-err .log-level-tag,
+.log-line.is-err .log-msg {
+  color: var(--err);
+}
+
+.log-line.is-debug {
+  opacity: 0.7;
+}
+
+/* ---------- 被截断文本可点击展开 ---------- */
+.info-desc-text.is-toggleable,
+.info-comment-text.is-toggleable {
+  cursor: pointer;
+}
+
+.info-comment-text.expanded {
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
