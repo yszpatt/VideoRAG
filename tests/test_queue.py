@@ -2,12 +2,11 @@ import asyncio
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.core.queue import Queue, TaskHandler, start_workers
 from app.db import init_db, make_session_factory
-from app.models import Base, Task
+from app.models import Task
 
 
 @pytest.fixture
@@ -96,3 +95,41 @@ async def test_start_workers_consumes_queued(session_factory):
     await asyncio.wait_for(ran.wait(), timeout=2)
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_claim_one_is_atomic_under_concurrency(session_factory):
+    """同一时刻只有一个 worker 能抢到同一条 pending 任务。
+
+    回归：原实现「SELECT 后直接改 row.status」在多 worker 下会同时读到同一行，
+    本用例在修复前稳定复现「4 个 worker 全部认领成功」。
+    """
+    q = Queue(session_factory, handlers={"fetch": TaskHandler(lambda p: asyncio.sleep(0))})
+    await q.enqueue(video_id="v1", type="fetch", payload={"n": 1})
+
+    claimed = [t for t in await asyncio.gather(*(q._claim_one() for _ in range(4))) if t]
+
+    assert len(claimed) == 1
+    assert claimed[0].payload == {"n": 1}  # 脱离 session 后仍可读（expunge）
+    async with session_factory() as s:
+        row = (await s.execute(select(Task).where(Task.id == claimed[0].id))).scalar_one()
+        assert row.status == "running"
+
+
+async def test_concurrent_process_one_runs_handler_once(session_factory):
+    """并发消费同一条任务时，handler 只执行一次，其余 worker 空手而归。"""
+    calls = []
+
+    async def handler(payload: dict) -> None:
+        calls.append(payload)
+        await asyncio.sleep(0.05)  # 拉长执行窗口，放大并发踩踏概率
+
+    q = Queue(session_factory, handlers={"fetch": TaskHandler(handler)})
+    task_id = await q.enqueue(video_id="v1", type="fetch", payload={"n": 1})
+
+    results = await asyncio.gather(*(q.process_one() for _ in range(3)))
+
+    assert calls == [{"n": 1}]
+    assert sorted(results) == [False, False, True]
+    async with session_factory() as s:
+        row = (await s.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        assert row.status == "done"
