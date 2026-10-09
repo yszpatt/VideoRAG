@@ -128,7 +128,9 @@ async def test_fetch_metadata_uses_cookie_for_douyin(tmp_path):
     cookie.write_text("# Netscape\n", encoding="utf-8")
     runner = _FakeRunner(_proc(stdout='{"title":"抖音视频"}'))
     await fetch_metadata("https://www.douyin.com/video/1", cookie_dir=str(tmp_path), runner=runner)
-    assert any(str(a).startswith("--cookies=") for a in runner.calls[0])
+    # 断言到**真实存在的 .txt 路径**，而不只是「有 --cookies= 前缀」：
+    # 路径漏掉 .txt 时 yt-dlp 会静默忽略（不报错、当没传），只测前缀抓不到这个 bug。
+    assert f"--cookies={cookie}" in runner.calls[0]
 
 
 async def test_fetch_metadata_nonzero_exit_raises():

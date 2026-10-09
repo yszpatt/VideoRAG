@@ -80,6 +80,30 @@ def test_fetch_falls_back_to_audio(tmp_path):
     assert media.path.endswith("audio.mp3")
 
 
+def test_fetch_ignores_stale_subtitle_from_previous_run(tmp_path):
+    """上次运行遗留的字幕文件不得被当成本次视频的字幕。
+
+    真实症状：`process_video` 把 workdir 传成 ""（= 进程 CWD = DATA_DIR），yt-dlp 把
+    字幕写成 `<DATA_DIR>/sub.zh-TW.vtt` 且 finally 刻意保留字幕；下一个「没有字幕」的
+    视频（小红书/抖音）进来时 `_try_subtitle` 只按后缀取目录里第一个文件，于是直接
+    吃下上一个视频的字幕——转写、笔记、切片全部变成上一个视频的内容。
+    """
+    (tmp_path / "sub.zh-TW.vtt").write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n上一个视频的字幕\n", encoding="utf-8"
+    )
+
+    def fake_runner(args):
+        if "--write-subs" in args:
+            return FakeResult(0)  # 本次视频没有字幕：yt-dlp 什么都不写
+        (tmp_path / "audio.mp3").touch()  # 降级到音频
+        return FakeResult(0)
+
+    fetcher = YtdlpFetcher(runner=fake_runner)
+    media = _run(fetcher, tmp_path)
+    assert media.kind == "audio"
+    assert "上一个视频的字幕" not in (media.subtitle_text or "")
+
+
 def test_fetch_raises_when_all_fail(tmp_path):
     def fake_runner(args):
         return FakeResult(0)  # 什么都不写
@@ -144,6 +168,30 @@ def test_bilibili_uses_cookie_when_present(tmp_path):
     with pytest.raises(FetchError):
         _run(fetcher, tmp_path, url="https://www.bilibili.com/video/BV1xx411c7mD")
     assert f"--cookies={cookie_dir / 'bilibili.txt'}" in seen[0]
+
+
+def test_cookie_args_for_points_at_existing_txt(tmp_path):
+    """cookie_args_for（元数据采集 / 视觉旁路共用）必须给真实存在的 .txt 路径。
+
+    回归：它曾把 ``--cookies=<dir>/xhs``（漏 .txt）传给 yt-dlp；yt-dlp 对不存在的
+    cookie 文件静默容忍，于是小红书/抖音的元数据采集长期「无 cookie 运行」，
+    表现为 meta_source=none、卡片退回显示链接。这里断言路径真实存在。
+    """
+    from pathlib import Path
+
+    from app.core.fetchers.ytdlp import cookie_args_for
+
+    cookie_dir = tmp_path / "cookies"
+    cookie_dir.mkdir()
+    (cookie_dir / "xhs.txt").write_text("# Netscape HTTP Cookie File\n")
+
+    args = cookie_args_for(str(cookie_dir), "xhs")
+    assert args == [f"--cookies={cookie_dir / 'xhs.txt'}"]
+    assert Path(args[0].split("=", 1)[1]).is_file()
+
+    # 该平台没有 cookie 文件时 -> 不传参数（而不是传一个不存在的路径）
+    assert cookie_args_for(str(cookie_dir), "youtube") == []
+    assert cookie_args_for(None, "xhs") == []
 
 
 def test_run_ytdlp_invokes_python_module(monkeypatch):

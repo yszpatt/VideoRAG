@@ -180,13 +180,47 @@ def run_ytdlp(args: Sequence[str], timeout: float = 600) -> subprocess.Completed
     )
 
 
+def clear_stale_outputs(workdir: str | Path, prefix: str) -> list[str]:
+    """删除 workdir 里上一次运行留下的 ``<prefix>.*`` 产物，返回被删路径。
+
+    为什么必须「先删」而不是「按 mtime 判断新旧」：yt-dlp 自己就会跳过已存在的
+    字幕文件（``Video subtitle zh-TW.vtt is already present``），也就是说只要上一轮
+    的同名字幕还在，本轮即使该视频真有字幕也不会重新下载。曾因此让一个遗留的
+    ``sub.zh-TW.vtt`` 被后续每个视频继承——转写 / 笔记 / 切片全部变成上一个视频
+    的内容（小红书、抖音这类没有字幕的平台必然命中）。
+
+    只删本模块自己 ``-o`` 模板生成的 ``sub.*`` / ``audio.*`` / ``video.*``，
+    不动 workdir 里其它文件；删除失败静默跳过（与 sweep_temp_media 同口径）。
+    """
+    removed: list[str] = []
+    d = Path(workdir)
+    if not d.is_dir():
+        return removed
+    for p in sorted(d.glob(f"{prefix}.*")):
+        if not p.is_file():
+            continue
+        try:
+            p.unlink()
+            removed.append(str(p))
+        except OSError:
+            pass
+    return removed
+
+
 def cookie_args_for(cookie_dir: str | None, platform: str) -> list[str]:
-    """为指定平台挑选 cookie 文件（目录下的 cookies/<platform>.txt）。"""
+    """为指定平台挑选 cookie 文件（目录下的 cookies/<platform>.txt）。
+
+    路径必须带 ``.txt``：yt-dlp 对**不存在**的 ``--cookies`` 文件是静默容忍的
+    （不报错、当没传），曾因此把元数据采集与视觉旁路变成「无 cookie 运行」——
+    症状是 meta_source=none、卡片退回显示链接，且小红书/抖音这类必需 cookie 的
+    平台尤其明显（主摄入链路由 YtdlpFetcher 自己拼路径，不受影响）。
+    """
     if not cookie_dir:
         return []
     for name in COOKIE_FILES:
-        if platform == name and Path(cookie_dir, f"{name}.txt").is_file():
-            return [f"--cookies={Path(cookie_dir, name)}"]
+        path = Path(cookie_dir, f"{name}.txt")
+        if platform == name and path.is_file():
+            return [f"--cookies={path}"]
     return []
 
 
@@ -318,11 +352,13 @@ async def fetch_video(
     因此这里单独调用 yt-dlp 下载 `bestvideo*+bestaudio`（与 `_try_video` 同参数）。
 
     - 复用 `cookie_args_for()` 的平台 cookie 逻辑（抖音/小红书必需）；
-    - 写入调用方给定的**显式绝对目录**（不复用 fetch 链的空 workdir + os.chdir 约定）；
+    - 写入调用方给定的**显式绝对目录**（不动进程 CWD；主 fetch 链同样由 pipeline
+      传入 ``downloads/<video_id>``，不再共用 DATA_DIR 根目录）；
     - 异常一律吞掉并记日志，由调用方保持「视觉失败不影响主流程」。
     """
     platform = detect_platform(url)
     cookie_args = cookie_args_for(cookie_dir, platform)
+    clear_stale_outputs(workdir, "video")
     args = [
         "-f", "bestvideo*+bestaudio/best",
         "--merge-output-format", "mp4",
@@ -388,6 +424,7 @@ class YtdlpFetcher:
     async def _try_subtitle(
         self, url: str, workdir: str, cookie_args: list[str]
     ) -> FetchedMedia | None:
+        clear_stale_outputs(workdir, "sub")
         await asyncio.to_thread(
             self._runner,
             [
@@ -402,7 +439,8 @@ class YtdlpFetcher:
             ],
         )
         sub_file = next(
-            (p for p in Path(workdir).iterdir() if p.suffix in SUBTITLE_EXTS), None
+            (p for p in sorted(Path(workdir).iterdir()) if p.suffix in SUBTITLE_EXTS),
+            None,
         )
         if sub_file is None:
             return None
@@ -418,6 +456,7 @@ class YtdlpFetcher:
     async def _try_audio(
         self, url: str, workdir: str, cookie_args: list[str]
     ) -> FetchedMedia | None:
+        clear_stale_outputs(workdir, "audio")
         await asyncio.to_thread(
             self._runner,
             [
@@ -431,7 +470,8 @@ class YtdlpFetcher:
             ],
         )
         audio = next(
-            (p for p in Path(workdir).iterdir() if p.suffix in AUDIO_EXTS), None
+            (p for p in sorted(Path(workdir).iterdir()) if p.suffix in AUDIO_EXTS),
+            None,
         )
         if audio is None:
             return None
@@ -440,6 +480,7 @@ class YtdlpFetcher:
     async def _try_video(
         self, url: str, workdir: str, cookie_args: list[str]
     ) -> FetchedMedia | None:
+        clear_stale_outputs(workdir, "video")
         await asyncio.to_thread(
             self._runner,
             [
@@ -451,7 +492,8 @@ class YtdlpFetcher:
             ],
         )
         video = next(
-            (p for p in Path(workdir).iterdir() if p.suffix in VIDEO_EXTS), None
+            (p for p in sorted(Path(workdir).iterdir()) if p.suffix in VIDEO_EXTS),
+            None,
         )
         if video is None:
             return None
