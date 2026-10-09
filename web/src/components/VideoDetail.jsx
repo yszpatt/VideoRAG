@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "./Markdown.jsx";
 import ProgressTrack, { PlatformBadge, StatusChip } from "./ProgressTrack.jsx";
 import { getNote, getTranscript, getVideo } from "../api.js";
@@ -18,12 +18,29 @@ function Chip({ children }) {
 /** E1：简介（4 行折叠）+ 标签；展示于笔记 Tab 顶部（热门评论已移至笔记下方） */
 function VideoMeta({ video }) {
   const [expanded, setExpanded] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  const descRef = useRef(null);
+  const tags = video?.tags || [];
+  const desc = (video?.description || "").trim();
+
+  // 按**真实布局**判断简介是否被 line-clamp 截断：原来用「字符数 > 240 或行数 > 4」猜，
+  // 窄屏（手机）下 200 字符就能撑到 6 行，猜不到 → 文本被截断却没有「展开全文」，
+  // 表现就是「笔记详情显示不全」。容器尺寸变化时用 ResizeObserver 重算。
+  useEffect(() => {
+    const el = descRef.current;
+    if (!el) return undefined;
+    const measure = () => setClipped(el.scrollHeight - el.clientHeight > 2);
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [desc, expanded]);
+
   if (!video) return null;
-  const tags = video.tags || [];
-  const desc = (video.description || "").trim();
   const noMeta = video.meta_source === "none";
-  const longDesc = desc.length > 240 || desc.split("\n").length > 4;
   if (!(desc || tags.length || noMeta)) return null;
+  const toggle = () => setExpanded((v) => !v);
 
   return (
     <div className="video-info">
@@ -45,19 +62,62 @@ function VideoMeta({ video }) {
         <div className="info-block">
           <div className="info-block-head">
             <h4>简介</h4>
-            {longDesc && (
-              <button
-                className="link-btn"
-                onClick={() => setExpanded((v) => !v)}
-              >
+            {(clipped || expanded) && (
+              <button className="link-btn" onClick={toggle}>
                 {expanded ? "收起" : "展开全文"}
               </button>
             )}
           </div>
-          <p className={`info-desc-text${expanded ? " expanded" : ""}`}>{desc}</p>
+          <p
+            ref={descRef}
+            className={`info-desc-text${expanded ? " expanded" : ""}${
+              clipped || expanded ? " is-toggleable" : ""
+            }`}
+            onClick={clipped || expanded ? toggle : undefined}
+            title={clipped && !expanded ? "点击展开全文" : undefined}
+          >
+            {desc}
+          </p>
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * 会被 line-clamp 截断时可点击展开的文本（按真实布局判断是否截断）。
+ *
+ * 热评原先是固定 3 行 clamp 且没有任何展开方式：长评论被切掉且看不出来，
+ * 用户侧的感受就是「显示不全」。这里量 scrollHeight/clientHeight，截断了才可点。
+ */
+function ClampText({ text, className }) {
+  const ref = useRef(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clipped, setClipped] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const measure = () => setClipped(el.scrollHeight - el.clientHeight > 2);
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, expanded]);
+
+  const canToggle = clipped || expanded;
+  const toggle = () => setExpanded((v) => !v);
+
+  return (
+    <p
+      ref={ref}
+      className={`${className}${expanded ? " expanded" : ""}${canToggle ? " is-toggleable" : ""}`}
+      onClick={canToggle ? toggle : undefined}
+      title={clipped && !expanded ? "点击展开全文" : undefined}
+    >
+      {text}
+    </p>
   );
 }
 
@@ -82,7 +142,7 @@ function HotComments({ video }) {
                 {fmtCount(c.like_count)} 赞
               </span>
             </div>
-            <p className="info-comment-text">{c.text}</p>
+            <ClampText text={c.text} className="info-comment-text" />
           </div>
         ))}
       </div>
