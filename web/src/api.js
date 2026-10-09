@@ -30,7 +30,28 @@ async function request(path, options = {}) {
 export const submitVideo = (url) =>
   request("/api/videos", { method: "POST", body: JSON.stringify({ url }) });
 
-export const listVideos = () => request("/api/videos");
+export const listVideos = (collectionId = null) =>
+  request(
+    `/api/videos${collectionId ? `?collection_id=${encodeURIComponent(collectionId)}` : ""}`,
+  );
+
+// ---- 收藏夹（视频收藏页侧边栏）----
+export const getCollections = () => request("/api/collections");
+
+export const createCollection = (name) =>
+  request("/api/collections", { method: "POST", body: JSON.stringify({ name }) });
+
+export const renameCollection = (id, name) =>
+  request(`/api/collections/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+
+export const deleteCollection = (id) =>
+  request(`/api/collections/${id}`, { method: "DELETE" });
+
+export const setVideoCollections = (videoId, collectionIds) =>
+  request(`/api/videos/${videoId}/collections`, {
+    method: "PUT",
+    body: JSON.stringify({ collection_ids: collectionIds }),
+  });
 
 export const getVideo = (id) => request(`/api/videos/${id}`);
 

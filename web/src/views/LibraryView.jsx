@@ -1,7 +1,14 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import VideoCard from "../components/VideoCard.jsx";
 import ConfirmDialog from "../components/ConfirmDialog.jsx";
 import { isActive } from "../lib/format.js";
+import {
+  createCollection,
+  deleteCollection,
+  getCollections,
+  renameCollection,
+  setVideoCollections,
+} from "../api.js";
 
 const FILTERS = [
   { key: "all", label: "全部" },
@@ -10,11 +17,43 @@ const FILTERS = [
   { key: "failed", label: "失败" },
 ];
 
-export default function LibraryView({ videos, onOpen, onRefresh, onGoSubmit, onImport, onDelete, refreshing, searchRef }) {
+export default function LibraryView({
+  videos,
+  onOpen,
+  onRefresh,
+  onGoSubmit,
+  onImport,
+  onDelete,
+  refreshing,
+  searchRef,
+  activeCollection = null,
+  onSelectCollection,
+  notify,
+}) {
   const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState("all");
   const [sort, setSort] = useState("newest");
   const [pending, setPending] = useState(null); // 待二次确认删除的视频
+  const [collections, setCollections] = useState([]);
+  const [totalVideos, setTotalVideos] = useState(0);
+  const [colError, setColError] = useState(null);
+
+  const loadCollections = useCallback(async () => {
+    try {
+      const d = await getCollections();
+      setCollections(d.collections || []);
+      setTotalVideos(d.total_videos ?? 0);
+      setColError(null);
+      return d.collections || [];
+    } catch (e) {
+      setColError(`收藏夹加载失败：${e.message}`);
+      return [];
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCollections();
+  }, [loadCollections]);
 
   const counts = useMemo(
     () => ({
@@ -44,13 +83,123 @@ export default function LibraryView({ videos, onOpen, onRefresh, onGoSubmit, onI
     return out;
   }, [videos, keyword, filter, sort]);
 
+  const activeName =
+    activeCollection == null
+      ? "全部视频"
+      : collections.find((c) => c.id === activeCollection)?.name || "收藏夹";
+
+  const onCreate = async () => {
+    const name = window.prompt("新建收藏夹，输入名称：");
+    if (name == null) return;
+    try {
+      const r = await createCollection(name);
+      await loadCollections();
+      notify?.(`已创建收藏夹「${r.collection.name}」`, "success");
+    } catch (e) {
+      notify?.(`创建失败：${e.message}`, "error");
+    }
+  };
+
+  const onRename = async (coll) => {
+    const name = window.prompt(`重命名「${coll.name}」：`, coll.name);
+    if (name == null || name.trim() === coll.name) return;
+    try {
+      await renameCollection(coll.id, name);
+      await loadCollections();
+    } catch (e) {
+      notify?.(`重命名失败：${e.message}`, "error");
+    }
+  };
+
+  const onDeleteCollection = async (coll) => {
+    if (
+      !window.confirm(
+        `删除收藏夹「${coll.name}」？\n其中的视频不会被删除，仍保留在其它收藏夹（默认收藏夹始终保留）。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteCollection(coll.id);
+      if (activeCollection === coll.id) onSelectCollection?.(null);
+      await loadCollections();
+      notify?.(`已删除收藏夹「${coll.name}」`, "success");
+    } catch (e) {
+      notify?.(`删除失败：${e.message}`, "error");
+    }
+  };
+
+  // 卡片上勾选收藏夹：整表替换语义（默认夹由服务端强制保留），写完刷新计数与列表
+  const onAssign = async (videoId, collectionIds) => {
+    try {
+      await setVideoCollections(videoId, collectionIds);
+      await loadCollections();
+      await onRefresh?.();
+    } catch (e) {
+      notify?.(`加入收藏夹失败：${e.message}`, "error");
+    }
+  };
+
   return (
-    <div className="view">
+    <div className="view library-view">
+      <aside className="lib-side">
+        <div className="lib-side-head">
+          <h3 className="lib-side-title">收藏夹</h3>
+          <button className="icon-btn" onClick={onCreate} title="新建收藏夹" aria-label="新建收藏夹">
+            ＋
+          </button>
+        </div>
+
+        <ul className="lib-col-list">
+          <li>
+            <button
+              className={`lib-col-item${activeCollection == null ? " is-active" : ""}`}
+              onClick={() => onSelectCollection?.(null)}
+            >
+              <span className="lib-col-name">全部视频</span>
+              <span className="lib-col-count">{totalVideos}</span>
+            </button>
+          </li>
+          {collections.map((c) => (
+            <li key={c.id} className="lib-col-row">
+              <button
+                className={`lib-col-item${activeCollection === c.id ? " is-active" : ""}`}
+                onClick={() => onSelectCollection?.(c.id)}
+                onDoubleClick={() => onRename(c)}
+                title={c.is_default ? "默认收藏夹：导入的视频自动进这里" : "双击重命名"}
+              >
+                <span className="lib-col-name">{c.name}</span>
+                {c.is_default && <span className="lib-col-tag">自动</span>}
+                <span className="lib-col-count">{c.count}</span>
+              </button>
+              {!c.is_default && (
+                <button
+                  className="lib-col-del"
+                  onClick={() => onDeleteCollection(c)}
+                  title="删除收藏夹"
+                  aria-label="删除收藏夹"
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        {colError && <p className="lib-col-err">{colError}</p>}
+        <p className="lib-side-foot muted small">
+          新导入的视频自动进入「默认收藏夹」，可在视频卡片左上角的文件夹按钮里加入其它收藏夹。
+        </p>
+      </aside>
+
       <section className="panel">
         <div className="panel-head">
           <div>
-            <h2 className="panel-title">视频收藏</h2>
-            <p className="panel-sub">共 {counts.all} 个视频 · {counts.done} 个已入库</p>
+            <h2 className="panel-title">{activeName}</h2>
+            <p className="panel-sub">
+              共 {counts.all} 个视频 · {counts.done} 个已入库
+              {activeCollection != null && ` · 当前收藏夹内 ${counts.all} 个`}
+            </p>
           </div>
           <div className="panel-head-actions">
             {onImport && (
@@ -96,7 +245,7 @@ export default function LibraryView({ videos, onOpen, onRefresh, onGoSubmit, onI
           <div className="empty">
             {videos.length === 0 ? (
               <>
-                <p>还没有视频</p>
+                <p>{activeCollection == null ? "还没有视频" : "这个收藏夹还是空的"}</p>
                 <button className="btn btn-gradient btn-sm" onClick={onGoSubmit}>
                   导入第一个视频
                 </button>
@@ -113,6 +262,8 @@ export default function LibraryView({ videos, onOpen, onRefresh, onGoSubmit, onI
                 video={v}
                 onOpen={onOpen}
                 onDelete={(vid) => setPending(vid)}
+                collections={collections}
+                onAssign={onAssign}
               />
             ))}
           </div>

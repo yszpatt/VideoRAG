@@ -222,6 +222,8 @@ function Shell() {
   const activeId = route.videoId || null;
 
   const [videos, setVideos] = useState([]);
+  // 当前收藏夹过滤（null = 全部）；过滤在服务端做，避免「收藏夹里超过一页查不全」
+  const [collectionFilter, setCollectionFilter] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [online, setOnline] = useState(true);
 
@@ -249,7 +251,7 @@ function Shell() {
     async (silent = false) => {
       if (!silent) setRefreshing(true);
       try {
-        const data = await listVideos();
+        const data = await listVideos(collectionFilter);
         setVideos(data);
         setOnline(true);
       } catch (e) {
@@ -259,7 +261,7 @@ function Shell() {
         if (!silent) setRefreshing(false);
       }
     },
-    [push],
+    [push, collectionFilter],
   );
 
   useEffect(() => {
@@ -537,6 +539,8 @@ function Shell() {
             {mainView === "library" && (
               <LibraryView
                 videos={videos}
+                activeCollection={collectionFilter}
+                onSelectCollection={setCollectionFilter}
                 onOpen={onOpenVideo}
                 onRefresh={() => refreshVideos(false)}
                 onGoSubmit={openImport}
@@ -544,6 +548,7 @@ function Shell() {
                 onDelete={onDeleteVideo}
                 refreshing={refreshing}
                 searchRef={librarySearchRef}
+                notify={push}
               />
             )}
             {mainView === "settings" && <SettingsView />}

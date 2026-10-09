@@ -8,7 +8,55 @@ import {
   platformOf,
 } from "../lib/format.js";
 
-function Thumb({ video, onDelete }) {
+/** 收藏夹勾选面板：点一下即写入（整表替换语义，默认夹不可取消）。 */
+function CollectionPicker({ video, collections, onAssign }) {
+  const current = new Set(video.collection_ids || []);
+  const [busy, setBusy] = useState(false);
+
+  const toggle = async (coll) => {
+    if (coll.is_default || busy) return; // 默认收藏夹：自动归属、不可取消
+    const next = new Set(current);
+    if (next.has(coll.id)) next.delete(coll.id);
+    else next.add(coll.id);
+    setBusy(true);
+    try {
+      await onAssign(video.id, [...next]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="vc-col-pop" onClick={(e) => e.stopPropagation()}>
+      <div className="vc-col-pop-head">
+        加入收藏夹
+        <span className="muted small">点击即保存</span>
+      </div>
+      <ul className="vc-col-pop-list">
+        {collections.map((c) => {
+          const on = current.has(c.id);
+          return (
+            <li key={c.id}>
+              <label className={`vc-col-item${c.is_default ? " is-locked" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={on}
+                  disabled={c.is_default || busy}
+                  onChange={() => toggle(c)}
+                />
+                <span className="vc-col-name">{c.name}</span>
+                {c.is_default && <span className="vc-col-tag">自动</span>}
+              </label>
+            </li>
+          );
+        })}
+        {collections.length === 0 && <li className="muted small">还没有收藏夹</li>}
+      </ul>
+    </div>
+  );
+}
+
+function Thumb({ video, onDelete, collections = [], onAssign, onTogglePicker, pickerOpen }) {
   const pf = platformOf(video.platform);
   const [failed, setFailed] = useState(false);
   // 有 has_thumbnail 时渲染 <img>，由后端 /thumbnail 端点按需代理下载并缓存；
@@ -30,6 +78,25 @@ function Thumb({ video, onDelete }) {
       </svg>
     </button>
   ) : null;
+  const ColBtn = onAssign ? (
+    <button
+      type="button"
+      className={`vc-col-btn${pickerOpen ? " is-active" : ""}`}
+      title="加入收藏夹"
+      aria-label="加入收藏夹"
+      onClick={(e) => {
+        e.stopPropagation();
+        onTogglePicker();
+      }}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+      </svg>
+    </button>
+  ) : null;
+  const Picker = pickerOpen ? (
+    <CollectionPicker video={video} collections={collections} onAssign={onAssign} />
+  ) : null;
   if (video.has_thumbnail && !failed) {
     return (
       <div className="vc-thumb">
@@ -41,7 +108,9 @@ function Thumb({ video, onDelete }) {
           onError={() => setFailed(true)}
         />
         <StatusChip status={video.status} />
+        {ColBtn}
         {DelBtn}
+        {Picker}
       </div>
     );
   }
@@ -55,16 +124,27 @@ function Thumb({ video, onDelete }) {
         {(pf.short || "?").slice(0, 1)}
       </div>
       <StatusChip status={video.status} />
+      {ColBtn}
       {DelBtn}
+      {Picker}
     </div>
   );
 }
 
-export default function VideoCard({ video, onOpen, onDelete, selected }) {
+export default function VideoCard({
+  video,
+  onOpen,
+  onDelete,
+  selected,
+  collections = [],
+  onAssign,
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
   const title = video.title || video.url;
   const dur = fmtDuration(video.duration_sec);
   const views = fmtCount(video.view_count);
   const date = fmtUploadDate(video.upload_date);
+  const mine = collections.filter((c) => (video.collection_ids || []).includes(c.id));
 
   return (
     <article
@@ -81,7 +161,14 @@ export default function VideoCard({ video, onOpen, onDelete, selected }) {
       role="button"
       tabIndex={0}
     >
-      <Thumb video={video} onDelete={onDelete} />
+      <Thumb
+        video={video}
+        onDelete={onDelete}
+        collections={collections}
+        onAssign={onAssign}
+        pickerOpen={pickerOpen}
+        onTogglePicker={() => setPickerOpen((v) => !v)}
+      />
       <div className="vc-body">
         <header className="vc-head">
           <PlatformBadge platform={video.platform} />
@@ -105,6 +192,16 @@ export default function VideoCard({ video, onOpen, onDelete, selected }) {
         <footer className="vc-foot">
           <span className="vc-open">查看笔记 →</span>
         </footer>
+
+        {mine.length > 0 && (
+          <div className="vc-cols" title="所属收藏夹">
+            {mine.map((c) => (
+              <span className={`vc-col-chip${c.is_default ? " is-default" : ""}`} key={c.id}>
+                {c.name}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </article>
   );
