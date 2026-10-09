@@ -176,10 +176,11 @@ cp .env.example .env   # 按需修改
 
 ## 在线配置（Web 界面）
 
-前端「设置」页（快捷键 `Alt+5`）分三个 Tab，改动保存后**即时热生效、无需重启容器**：
+前端「设置」页（快捷键 `Alt+5`）分四个 Tab，改动保存后**即时热生效、无需重启容器**：
 
 - **服务配置**：LLM / Embedding / ASR 三组服务连接参数 + 检索策略参数（召回条数、权重、相似度门槛等），每组带「测试连通性」探活；API Key 始终脱敏显示，掩码保存不会覆盖原值
 - **本地模型**：SenseVoice / Embedding 模型下载与知识库重建
+- **Cookie / 登录**：小红书 / 抖音 / B 站 / YouTube 的登录 cookie 粘贴导入、文件导入、状态与过期检查（只写不读，不回显内容）
 - **提示词**：笔记与问答提示词在线编辑
 
 配置持久化到 `$DATA_DIR/runtime.env`（优先级：`runtime.env` > 环境变量 / `.env` > 代码默认值），由 Web 界面维护、请勿手工编辑；删除 `runtime.env` 后重启容器即恢复环境变量配置。
@@ -238,12 +239,17 @@ cp .env.example .env   # 按需修改
 
 | 平台 | 支持 | 需要 cookie？ |
 |------|------|--------------|
-| B站 / YouTube | 字幕/音频/视频 | 可选（提升稳定性） |
+| B站 | 字幕/音频/视频 | 可选：登录后才有 1080P+ 画质、CC 字幕、会员/私有内容 |
+| YouTube | 音频/视频 | 可选：年龄限制 / 会员 / 私有内容必需（另有 PO Token 与 cookie 轮换限制，见文档） |
 | 通用直链（mp4/m3u8 等） | 直接下载 | 否 |
 | 抖音 / 小红书（未经测试不保证能用） | 音频/视频 | **必需** |
 
-抖音/小红书需登录 cookie：用浏览器插件（如「Get cookies.txt LOCALLY」）导出 Netscape 格式
-cookie，按文件名放入数据目录 `cookies/`：
+抖音/小红书需登录 cookie。**推荐在「设置 → Cookie / 登录」页签导入，不需要装浏览器扩展**：
+任选一条路——① F12 → 网络 → 任一请求右键「复制为 cURL」后粘贴；② 复制请求头里的 `Cookie:`
+一行粘贴；③（桌面 / 裸机）直接点「从浏览器导入」读本机浏览器；④ 扩展导出 Netscape / JSON 文件
+（扩展这条路最容易失效，故排最后）。逐平台步骤见
+**[docs/xiaohongshu-guide.md](docs/xiaohongshu-guide.md)**，方式对比见
+**[docs/cookies-and-login.md](docs/cookies-and-login.md)**。也可按文件名手工放入数据目录：
 
 ```text
 /data/cookies/douyin.txt          # 抖音（未测试）
@@ -253,6 +259,14 @@ cookie，按文件名放入数据目录 `cookies/`：
 ```
 
 未放 cookie 时，提交抖音/小红书链接会立即返回明确错误提示。
+
+小红书是一整套独立的操作流程（导出 cookie 的步骤、**必须带 `xsec_token` 的链接形态**、
+短链限制、风控与排查），单独写在 **[docs/xiaohongshu-guide.md](docs/xiaohongshu-guide.md)**；
+抖音把其中的 `xhs` 换成 `douyin` 即可。
+
+各平台的登录要求差异、以及「能不能做扫码登录」的可行性结论与依据，见
+**[docs/cookies-and-login.md](docs/cookies-and-login.md)**（B站 可用纯 HTTP 扫码登录；
+小红书/抖音 不建议自建协议，推荐设置页导入或桌面形态的应用内登录窗口）。
 
 ## 已下载媒体归档（可选，默认关闭）
 
