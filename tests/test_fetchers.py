@@ -9,6 +9,7 @@ from app.core.fetchers.ytdlp import FetchError, YtdlpFetcher, detect_platform, p
 class FakeResult:
     returncode: int
     stdout: str = ""
+    stderr: str = ""
 
 
 @pytest.mark.parametrize(
@@ -358,3 +359,85 @@ def _run(fetcher, tmp_path, url="https://www.youtube.com/watch?v=abc"):
     import asyncio
 
     return asyncio.run(fetcher.fetch(url, str(tmp_path)))
+
+
+# ============ 抖音间歇 403：重试 + 把 yt-dlp 的真实原因带出来 ============
+
+
+def test_douyin_retries_transient_failure(tmp_path, monkeypatch):
+    """抖音 web 接口是签名风控接口，同一链接会间歇 403 → 必须自动重试。
+
+    实测（容器内同链接 4 次）：2 次成功、2 次报
+    "Fresh cookies (not necessarily logged in) are needed"。没有重试时用户看到的就是
+    "all fetch strategies failed"，会误以为平台不支持。
+    """
+    from app.core.fetchers import ytdlp as y
+
+    monkeypatch.setattr(y, "RETRY_BACKOFF_SEC", 0.01)
+    cookie_dir = tmp_path / "cookies"
+    cookie_dir.mkdir()
+    (cookie_dir / "douyin.txt").write_text("# Netscape HTTP Cookie File\n")
+
+    calls = {"n": 0}
+
+    def flaky_runner(args):
+        calls["n"] += 1
+        # 第一轮 3 个策略全失败；第二轮音频路成功
+        if calls["n"] > 3 and "--audio-format" in args:
+            (tmp_path / "audio.mp3").write_bytes(b"x")
+            return FakeResult(0)
+        return FakeResult(
+            1,
+            stderr="ERROR: [Douyin] 123: Fresh cookies (not necessarily logged in) are needed\n",
+        )
+
+    fetcher = YtdlpFetcher(runner=flaky_runner, cookie_dir=str(cookie_dir))
+    media = _run(fetcher, tmp_path, url="https://v.douyin.com/N55B41dGcr0/")
+
+    assert media.kind == "audio"
+    assert calls["n"] > 3  # 确实重试过
+
+
+def test_fetch_error_carries_ytdlp_reason(tmp_path, monkeypatch):
+    """彻底失败时，报错必须带上 yt-dlp 的原因（否则无法区分超时 / 403 / 不支持）。"""
+    from app.core.fetchers import ytdlp as y
+
+    monkeypatch.setattr(y, "RETRY_BACKOFF_SEC", 0.01)
+    cookie_dir = tmp_path / "cookies"
+    cookie_dir.mkdir()
+    (cookie_dir / "douyin.txt").write_text("# Netscape HTTP Cookie File\n")
+
+    def failing_runner(args):
+        return FakeResult(
+            1,
+            stderr=(
+                "WARNING: [Douyin] something\n"
+                "ERROR: [Douyin] 123: Fresh cookies (not necessarily logged in) are needed\n"
+            ),
+        )
+
+    fetcher = YtdlpFetcher(runner=failing_runner, cookie_dir=str(cookie_dir))
+    with pytest.raises(FetchError) as ei:
+        _run(fetcher, tmp_path, url="https://v.douyin.com/N55B41dGcr0/")
+
+    msg = str(ei.value)
+    assert "all fetch strategies failed" in msg
+    assert "Fresh cookies" in msg  # 真实原因带出来了
+    assert "WARNING" not in msg    # 只带 ERROR 行，不糊一整段 stderr
+
+
+def test_non_flaky_platform_is_not_retried(tmp_path):
+    """B站 等平台不重试：坏链接不该被拖成 N 倍耗时（一轮 = 字幕 + 音频 + 视频）。"""
+    cookie_dir = tmp_path / "cookies"
+    cookie_dir.mkdir()
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        return FakeResult(1, stderr="ERROR: [BiliBili] boom\n")
+
+    fetcher = YtdlpFetcher(runner=runner, cookie_dir=str(cookie_dir))
+    with pytest.raises(FetchError):
+        _run(fetcher, tmp_path, url="https://www.bilibili.com/video/BV1xx411c7mD")
+
+    assert len(calls) == 3

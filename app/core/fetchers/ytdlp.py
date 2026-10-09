@@ -30,6 +30,27 @@ MAX_COMMENT_CHARS = 2000
 COOKIE_REQUIRED = ("douyin", "xhs")
 COOKIE_FILES = ("douyin", "xhs", "bilibili", "youtube")
 
+# 抖音走签名风控接口（www.douyin.com/aweme/v1/web/aweme/detail/）：yt-dlp 侧仍是
+# `# TODO: Run verification challenge code to generate signature cookies`，因此同一
+# 链接会**间歇性 403**（实测 4 次里 2 次失败，报 "Fresh cookies (not necessarily
+# logged in) are needed"）。对这类平台做有限重试，把偶发失败变成基本能过；
+# 其余平台不重试，避免「链接本身就坏」的情况被拖成 N 倍耗时。
+FLAKY_PLATFORMS = ("douyin",)
+FETCH_ATTEMPTS = 3        # 含首次
+RETRY_BACKOFF_SEC = 3.0   # 第 n 次重试前等待 n × 该值
+
+_ERROR_HINT_CHARS = 300
+
+
+def _error_hint(stderr: str) -> str:
+    """从 yt-dlp 的 stderr 里挑出对用户最有用的一行（优先最后一条 ``ERROR:``）。"""
+    for line in reversed((stderr or "").splitlines()):
+        line = line.strip()
+        if line.startswith("ERROR:"):
+            return line[:_ERROR_HINT_CHARS]
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    return lines[-1][:_ERROR_HINT_CHARS] if lines else ""
+
 
 class FetchError(Exception):
     """所有获取策略都失败。"""
@@ -390,6 +411,18 @@ class YtdlpFetcher:
     def __init__(self, runner: Runner | None = None, cookie_dir: str | None = None):
         self._runner = runner or run_ytdlp
         self._cookie_dir = cookie_dir
+        self._last_error = ""  # 最近一次 yt-dlp 的失败原因（失败时回给用户）
+
+    def _note_result(self, proc) -> None:
+        """记录 yt-dlp 的失败原因。
+
+        我们按「workdir 里有没有产物」判断成败、不看返回码——但把返回码对应的
+        stderr 一并丢掉，用户就只剩一句 "all fetch strategies failed"，无法区分
+        「平台不支持 / 网络超时 / 403 风控 / cookie 过期」。这里留痕，最后由
+        fetch() 带进报错信息。
+        """
+        if getattr(proc, "returncode", 0):
+            self._last_error = _error_hint(getattr(proc, "stderr", "") or "")
 
     def _cookie_path_for(self, platform: str) -> str | None:
         if not self._cookie_dir:
@@ -405,27 +438,45 @@ class YtdlpFetcher:
         cookie_path = self._cookie_path_for(platform)
         if platform in COOKIE_REQUIRED and cookie_path is None:
             raise FetchError(
-                f"{platform} 视频需要登录 cookie：请用浏览器插件导出 Netscape 格式 cookie，"
-                f"保存为 {Path(self._cookie_dir or '/data/cookies')}/{platform}.txt"
+                f"{platform} 视频需要登录 cookie：请在「设置 → Cookie / 登录」导入，"
+                f"或手工保存为 {Path(self._cookie_dir or '/data/cookies')}/{platform}.txt"
             )
         cookie_args = [f"--cookies={cookie_path}"] if cookie_path else []
 
+        attempts = FETCH_ATTEMPTS if platform in FLAKY_PLATFORMS else 1
+        self._last_error = ""
+        for attempt in range(1, attempts + 1):
+            media = await self._fetch_once(url, workdir, cookie_args)
+            if media:
+                return media
+            if attempt < attempts:
+                delay = RETRY_BACKOFF_SEC * attempt
+                logger.warning(
+                    "%s 第 %d/%d 次抓取无产物（%s），%.0fs 后重试",
+                    platform, attempt, attempts, self._last_error or "无 yt-dlp 报错", delay,
+                )
+                await asyncio.sleep(delay)
+
+        detail = f"；最后一次错误：{self._last_error}" if self._last_error else ""
+        raise FetchError(f"all fetch strategies failed for {url}{detail}")
+
+    async def _fetch_once(
+        self, url: str, workdir: str, cookie_args: list[str]
+    ) -> FetchedMedia | None:
+        """跑一轮「字幕 → 音频 → 视频」降级链；全都没产物返回 None。"""
         media = await self._try_subtitle(url, workdir, cookie_args)
         if media:
             return media
         media = await self._try_audio(url, workdir, cookie_args)
         if media:
             return media
-        media = await self._try_video(url, workdir, cookie_args)
-        if media:
-            return media
-        raise FetchError(f"all fetch strategies failed for {url}")
+        return await self._try_video(url, workdir, cookie_args)
 
     async def _try_subtitle(
         self, url: str, workdir: str, cookie_args: list[str]
     ) -> FetchedMedia | None:
         clear_stale_outputs(workdir, "sub")
-        await asyncio.to_thread(
+        proc = await asyncio.to_thread(
             self._runner,
             [
                 "--skip-download",
@@ -438,6 +489,7 @@ class YtdlpFetcher:
                 url,
             ],
         )
+        self._note_result(proc)
         sub_file = next(
             (p for p in sorted(Path(workdir).iterdir()) if p.suffix in SUBTITLE_EXTS),
             None,
@@ -457,7 +509,7 @@ class YtdlpFetcher:
         self, url: str, workdir: str, cookie_args: list[str]
     ) -> FetchedMedia | None:
         clear_stale_outputs(workdir, "audio")
-        await asyncio.to_thread(
+        proc = await asyncio.to_thread(
             self._runner,
             [
                 "-f", "bestaudio/best",
@@ -469,6 +521,7 @@ class YtdlpFetcher:
                 url,
             ],
         )
+        self._note_result(proc)
         audio = next(
             (p for p in sorted(Path(workdir).iterdir()) if p.suffix in AUDIO_EXTS),
             None,
@@ -481,7 +534,7 @@ class YtdlpFetcher:
         self, url: str, workdir: str, cookie_args: list[str]
     ) -> FetchedMedia | None:
         clear_stale_outputs(workdir, "video")
-        await asyncio.to_thread(
+        proc = await asyncio.to_thread(
             self._runner,
             [
                 "-f", "bestvideo*+bestaudio/best",
@@ -491,6 +544,7 @@ class YtdlpFetcher:
                 url,
             ],
         )
+        self._note_result(proc)
         video = next(
             (p for p in sorted(Path(workdir).iterdir()) if p.suffix in VIDEO_EXTS),
             None,
