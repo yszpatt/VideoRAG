@@ -330,3 +330,64 @@ async def test_from_browser_failure_surfaces_ytdlp_message(client, monkeypatch):
 async def test_from_browser_rejects_unknown_browser(client):
     r = await client.post("/api/cookies/xhs/from-browser", json={"browser": "netscape"})
     assert r.status_code == 404
+
+
+# ============ 「已过期」判定只认关键 cookie（修无关 cookie 误报）============
+
+
+async def test_unrelated_expired_cookie_does_not_flag_expired(client):
+    """无关埋点 cookie 过期 ≠ 登录态失效。
+
+    回归：实测用户的小红书 jar 里 web_session / a1 还有一年有效期，只有埋点
+    `sec_poison_id` 当天过期；此前按**全部** cookie 取最早过期时间，于是设置页
+    对一份完全可用的 cookie 报「已过期」。
+    """
+    now = int(time.time())
+    content = (
+        "# Netscape HTTP Cookie File\n"
+        f".xiaohongshu.com\tTRUE\t/\tTRUE\t{now + 86400 * 300}\tweb_session\tGOOD\n"
+        f".xiaohongshu.com\tTRUE\t/\tTRUE\t{now + 86400 * 300}\ta1\tGOOD2\n"
+        f".xiaohongshu.com\tTRUE\t/\tFALSE\t{now - 60}\tsec_poison_id\tSTALE\n"
+    )
+    st = (await client.put("/api/cookies/xhs", json={"content": content})).json()["status"]
+
+    assert st["expired"] is False                    # 不再误报
+    assert st["key_cookies_expired"] == []
+    assert st["key_expires_at"] > now
+    assert st["stale_cookies"] == 1                  # 但如实附注
+    assert st["stale_cookie_names"] == ["sec_poison_id"]
+
+
+async def test_expired_key_cookie_still_flagged(client):
+    """关键 cookie 真过期时必须报出来。"""
+    now = int(time.time())
+    content = (
+        "# Netscape HTTP Cookie File\n"
+        f".xiaohongshu.com\tTRUE\t/\tTRUE\t{now - 60}\tweb_session\tOLD\n"
+        f".xiaohongshu.com\tTRUE\t/\tTRUE\t{now + 86400}\ta1\tGOOD\n"
+    )
+    st = (await client.put("/api/cookies/xhs", json={"content": content})).json()["status"]
+
+    assert st["expired"] is True
+    assert st["key_cookies_expired"] == ["web_session"]
+
+
+async def test_session_only_key_cookie_is_not_expired(client):
+    """关键 cookie 是会话 cookie（expires=0）时不算过期：jar 复用期间一直有效。"""
+    content = (
+        "# Netscape HTTP Cookie File\n"
+        ".xiaohongshu.com\tTRUE\t/\tTRUE\t0\tweb_session\tSESSION\n"
+    )
+    st = (await client.put("/api/cookies/xhs", json={"content": content})).json()["status"]
+
+    assert st["expired"] is False
+    assert st["key_cookies_expired"] == []
+    assert st["session_cookies"] == 1
+
+
+async def test_douyin_key_cookies_match_extractor_requirement(client):
+    """抖音的关键 cookie 必须包含提取器实际检查的 s_v_web_id（与 ttwid）。"""
+    r = await client.get("/api/cookies")
+    douyin = next(p for p in r.json()["platforms"] if p["key"] == "douyin")
+    assert "s_v_web_id" in douyin["key_cookies"]
+    assert "ttwid" in douyin["key_cookies"]

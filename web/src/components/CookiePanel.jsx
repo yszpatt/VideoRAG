@@ -266,8 +266,23 @@ export default function CookiePanel() {
               )}
               {p.configured && p.expired && (
                 <div className="alert alert-error" style={{ padding: "6px 10px", fontSize: 12 }}>
-                  检测到 cookie 已过期，请重新登录导出。
+                  关键 cookie 已过期
+                  {p.key_cookies_expired?.length ? `（${p.key_cookies_expired.join("、")}）` : ""}
+                  ，请重新登录导出。
                 </div>
+              )}
+              {p.configured && !p.expired && p.key_expires_at > 0 && (
+                <span className="muted small">
+                  关键 cookie 有效期至{" "}
+                  {new Date(p.key_expires_at * 1000).toLocaleDateString()}
+                </span>
+              )}
+              {p.configured && p.stale_cookies > 0 && (
+                <span className="muted small">
+                  另有 {p.stale_cookies} 条无关 cookie 已过期
+                  {p.stale_cookie_names?.length ? `（${p.stale_cookie_names.join("、")}）` : ""}
+                  ，不影响登录态
+                </span>
               )}
 
               <label className="field">

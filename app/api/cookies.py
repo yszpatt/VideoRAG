@@ -60,8 +60,14 @@ PLATFORMS: dict[str, dict] = {
     "douyin": {
         "label": "抖音",
         "required": True,
-        "key_cookies": ["sessionid", "sessionid_ss"],
-        "note": "必需：未配置时提交抖音链接会被直接拒绝",
+        # s_v_web_id：yt-dlp 的抖音提取器显式检查它（tiktok.py 的 DouyinIE 在 web
+        # detail JSON 为空时，用 `expected=not ...get('s_v_web_id')` 区分「缺指纹」
+        # 与「真异常」）；ttwid 是匿名设备标识。缺这两个时 web 接口更易被 403。
+        "key_cookies": ["s_v_web_id", "ttwid", "sessionid", "sessionid_ss"],
+        "note": (
+            "必需：未配置时提交抖音链接会被直接拒绝。抖音 web 接口是签名风控接口，"
+            "偶发 403 属平台行为，本项目会自动重试"
+        ),
         "default_domain": ".douyin.com",
         "domains": ["douyin.com", "iesdouyin.com"],
     },
@@ -349,17 +355,41 @@ def _status(platform: str, path: Path) -> dict:
         return item
 
     names = {c.name for c in cookies}
+    by_name: dict[str, _Cookie] = {c.name: c for c in cookies}
     found = [n for n in meta["key_cookies"] if n in names]
-    expiries = [c.expires for c in cookies if c.expires and c.expires > 0]
     now = int(time.time())
+
+    # 过期判定只看**关键 cookie**（登录/设备指纹那几条）：
+    # 浏览器导出的 jar 里混着大量埋点 / 追踪 cookie，它们过期与登录态无关——
+    # 曾因此把好的小红书 cookie 显示成「已过期」（实测只有 sec_poison_id 过期，
+    # web_session / a1 都还有一年）。无用 cookie 的过期只作为附注信息。
+    key_expired = [
+        n for n in found if by_name[n].expires and 0 < by_name[n].expires <= now
+    ]
+    key_live = [
+        by_name[n].expires for n in found if by_name[n].expires and by_name[n].expires > now
+    ]
+    all_expiries = [c.expires for c in cookies if c.expires and c.expires > 0]
+    stale_others = sorted(
+        {
+            c.name
+            for c in cookies
+            if c.name not in meta["key_cookies"] and c.expires and 0 < c.expires <= now
+        }
+    )
     item.update(
         format=fmt,
         count=len(cookies),
         domains=sorted({c.domain for c in cookies if c.domain}),
         key_cookies_found=found,
         key_cookies_missing=[n for n in meta["key_cookies"] if n not in names],
-        earliest_expiry=min(expiries) if expiries else 0,
-        expired=bool(expiries) and min(expiries) <= now,
+        key_cookies_expired=key_expired,
+        key_expires_at=min(key_live) if key_live else 0,
+        expired=bool(key_expired),
+        # 附注：无关 cookie 的过期数量（前端只作提示，不再报「已过期」）
+        stale_cookies=len(stale_others),
+        stale_cookie_names=stale_others[:5],
+        earliest_expiry=min(all_expiries) if all_expiries else 0,
         session_cookies=sum(1 for c in cookies if not c.expires),
     )
     return item
