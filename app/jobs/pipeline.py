@@ -48,6 +48,26 @@ async def fetch_with_fallback(
     raise FetchError(f"all fetch providers failed for {url}: {last}")
 
 
+def _media_workdir(data_dir: str, video_id: str) -> str:
+    """本次摄入专属的下载工作目录：``<DATA_DIR>/downloads/<video_id>``。
+
+    为什么不传 ""（= 进程 CWD = DATA_DIR）：fetch 链把 ``sub.*`` / ``audio.*`` /
+    ``video.*`` 直接写在 CWD，退出后**字幕文件刻意保留**，于是 DATA_DIR 根目录会长期
+    躺着一个上一个视频的 ``sub.zh-TW.vtt``；下一个视频（尤其小红书/抖音这类无字幕
+    平台）的 ``_try_subtitle`` 只按后缀取目录里第一个文件，就把上一个视频的字幕当成
+    自己的——转写、笔记、切片、向量全部是上一个视频的内容（yt-dlp 对已存在的字幕
+    还会直接跳过下载，连"真有字幕"的视频也会继承旧文件）。
+
+    放 ``downloads/`` 下的好处：它本来就是启动时 ``sweep_temp_media`` 清扫的临时目录，
+    同一个视频的残留也不会跨视频串味；目录按 video_id 隔离，重跑同一视频时由
+    ``clear_stale_outputs`` 清掉上一轮产物。字幕仍然保留（可人工排查），失败路径
+    也不影响清理。
+    """
+    path = Path(data_dir) / "downloads" / video_id
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 async def transcribe_with_fallback(
     media: FetchedMedia, transcribers: list[Transcriber]
 ) -> tuple[Transcript, str]:
@@ -120,7 +140,9 @@ async def process_video(
         if meta:
             title = meta.get("title") or title  # 笔记/入库用真实标题（替代 URL 兜底）
 
-        media, _used_fetcher = await fetch_with_fallback(url, "", fetchers)
+        media, _used_fetcher = await fetch_with_fallback(
+            url, _media_workdir(data_dir, video_id), fetchers
+        )
 
         await _save(session_factory, video_id, status="transcribing")
         transcript, _used_transcriber = await transcribe_with_fallback(media, transcribers)

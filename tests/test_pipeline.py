@@ -83,6 +83,43 @@ async def test_fetch_raises_when_all_fail(tmp_path):
         await fetch_with_fallback("https://x", str(tmp_path), chain)
 
 
+async def test_ingest_uses_per_video_download_workdir(tmp_path):
+    """fetch 链必须落在 ``<DATA_DIR>/downloads/<video_id>``，不能是 DATA_DIR 根目录。
+
+    回归：workdir 曾是 ""（= 进程 CWD = DATA_DIR），下载的字幕直接写在数据根目录且
+    被刻意保留，下一个视频会把它当自己的字幕读走——转写/笔记/切片全部变成上一个
+    视频的内容（见 tests/test_fetchers.py 里同源的 stale 用例）。
+    """
+    from pathlib import Path
+
+    from app.config import Settings
+    from app.db import init_db, make_session_factory
+    from app.models import Video
+
+    settings = Settings(_env_file=None, data_dir=str(tmp_path))
+    engine, factory = make_session_factory(settings)
+    await init_db(engine, settings)
+    async with factory() as s:
+        s.add(Video(id="vidwd", platform="youtube", url="https://youtu.be/x"))
+        await s.commit()
+
+    seen: list[str] = []
+
+    class RecordingFetcher:
+        name = "sub"
+
+        async def fetch(self, url, workdir):
+            seen.append(workdir)
+            return None  # 全部失败 → 视频标记 failed，但 workdir 已被记录
+
+    await process_video("vidwd", factory, [RecordingFetcher()], [], FakeLLM(), str(tmp_path))
+
+    assert seen == [str(Path(tmp_path) / "downloads" / "vidwd")]
+    assert Path(seen[0]).is_dir()
+    assert Path(seen[0]) != Path(tmp_path)
+    await engine.dispose()
+
+
 async def test_transcribe_starts_at_matching_provider():
     media = FetchedMedia(kind="subtitle", subtitle_text="x", meta={"segments": [(0, 1, "x")]})
     chain = [
