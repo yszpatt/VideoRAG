@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { clearHistory, getSettings, probeService, saveSettings } from "../api.js";
 import ConfirmDialog from "../components/ConfirmDialog.jsx";
+import CookiePanel from "../components/CookiePanel.jsx";
 import LocalModelsPanel from "../components/LocalModelsPanel.jsx";
 import PromptTab from "../components/PromptTab.jsx";
 
@@ -60,6 +61,7 @@ const VISUAL_PIPELINE_OPTIONS = [
 const TABS = [
   { key: "services", label: "服务配置" },
   { key: "models", label: "本地模型" },
+  { key: "cookies", label: "Cookie / 登录" },
   { key: "prompts", label: "提示词" },
 ];
 
@@ -416,7 +418,9 @@ export default function SettingsView() {
                 ? "在线调整模型服务，保存后立即生效（写入运行时配置，重启不丢失）"
                 : tab === "models"
                   ? "本地降级模型（ASR / Embedding）的下载、手动指定与连通性检查；未配置远程服务参数时自动回落本地"
-                  : "自定义笔记与问答的提示词，保存后下一次生成 / 提问即生效"}
+                  : tab === "cookies"
+                    ? "各平台登录 cookie（小红书 / 抖音必需，B 站 / YouTube 可选）：粘贴或导入文件，保存即生效、无需重启"
+                    : "自定义笔记与问答的提示词，保存后下一次生成 / 提问即生效"}
             </p>
           </div>
         </div>
@@ -434,6 +438,8 @@ export default function SettingsView() {
         </div>
 
         {tab === "prompts" && <PromptTab />}
+
+        {tab === "cookies" && <CookiePanel />}
 
         {tab === "models" && !loading && (
           <>

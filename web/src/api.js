@@ -103,6 +103,27 @@ export const previewPrompt = (key, value = null) =>
     body: JSON.stringify(value !== null ? { key, value } : { key }),
   });
 
+// ---- Cookie / 登录（设置页「Cookie / 登录」页签；只回传元信息，不回传内容）----
+export const getCookies = () => request("/api/cookies");
+
+export const saveCookie = (platform, content) =>
+  request(`/api/cookies/${platform}`, {
+    method: "PUT",
+    body: JSON.stringify({ content }),
+  });
+
+export const deleteCookie = (platform) =>
+  request(`/api/cookies/${platform}`, { method: "DELETE" });
+
+// 「从浏览器导入」：仅当服务器本机有浏览器 profile（桌面 / 裸机）时可用
+export const getBrowsers = () => request("/api/cookies/browsers");
+
+export const importCookieFromBrowser = (platform, browser) =>
+  request(`/api/cookies/${platform}/from-browser`, {
+    method: "POST",
+    body: JSON.stringify({ browser }),
+  });
+
 export const listHistory = (kind, limit = 20) =>
   request(`/api/history?kind=${kind}&limit=${limit}`);
 

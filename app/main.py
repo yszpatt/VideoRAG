@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.cookies import router as cookies_router
 from app.api.history import router as history_router
 from app.api.prompts import router as prompts_router
 from app.api.search import router as search_router
@@ -159,6 +160,7 @@ def create_app(
     app.include_router(models_router)
     app.include_router(prompts_router)
     app.include_router(history_router)
+    app.include_router(cookies_router)
 
     @app.get("/health")
     async def health() -> dict:
