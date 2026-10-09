@@ -42,6 +42,12 @@ B 站 `.bilibili.com`、YouTube `.youtube.com`），接口会回显 `assumed_dom
   yt-dlp 可能报解密失败，此时请改用①或②。
 - 读取会挑出**该平台的 cookie** 落盘，不会把你整库（含其它站点登录态）写进项目。
 
+> **关于设置页的「已过期」**：只看**关键 cookie**（登录 / 设备指纹那几条，如 `web_session`、
+> `SESSDATA`、`s_v_web_id`）的有效期。浏览器导出的 jar 里混着大量埋点 / 追踪 cookie，它们
+> 过期与登录态无关——实测一份完全可用的小红书 cookie 里，只有埋点 `sec_poison_id` 当天过期。
+> 现在这类只会附注「另有 N 条无关 cookie 已过期」，不再把可用的 cookie 报成过期；
+> 关键 cookie 是会话 cookie（`expires=0`）时也不算过期（jar 复用期间一直有效）。
+
 ## 1. 依据：各家到底需要什么
 
 ### 1.1 小红书 / 抖音 —— 必需
@@ -77,6 +83,44 @@ yt-dlp 源码 `yt_dlp/extractor/bilibili.py`：
 - **OAuth 登录已失效**，官方明确改为「用 cookie」；
 - cookie 会被轮换：官方建议在**无痕窗口**登录 → 访问 `youtube.com/robots.txt` → 导出 → **立刻关闭该窗口**，否则导出的 cookie 很快失效；
 - 风险提示：官方警告用主账号配合 yt-dlp 有被封风险，建议小号 + 控制请求频率（游客会话约 300 视频/小时）。
+
+### 1.4 抖音：cookie 齐全也会间歇失败（平台侧风控，不是配置问题）
+
+**症状**：提交抖音链接报 `all fetch strategies failed`，同一个链接有时又能成功。
+
+**根因（实测）**：yt-dlp 的抖音提取器走的是
+`https://www.douyin.com/aweme/v1/web/aweme/detail/`，这是**签名风控接口** —— 源码里
+`yt_dlp/extractor/tiktok.py` 的 `DouyinIE._real_extract` 至今挂着
+
+```python
+# TODO: Run verification challenge code to generate signature cookies
+raise ExtractorError('Fresh cookies (not necessarily logged in) are needed',
+                     expected=not self._get_cookies(self._WEBPAGE_HOST).get('s_v_web_id'))
+```
+
+即：该接口没有稳定的签名实现，服务端风控会让同一请求时而 403。容器内同一链接连测 4 次，
+**2 次成功、2 次报 `Fresh cookies ... needed`**；换成分享域名 `/share/video/<id>` 也走同一
+提取器，4 次里 3 次成功 —— 所以这是概率问题，不是「不支持抖音」。
+
+**本项目做的处理**：
+
+1. 对抖音做**有限重试**（最多 3 次，退避 3s / 6s）——按 ~50% 单次成功率，3 次后失败率降到 ~12%；
+2. 失败信息里**带上 yt-dlp 的真实原因**（此前被吞掉，只报 `all fetch strategies failed`，
+   让人误判为平台不支持）；
+3. 设置页的抖音「关键 cookie」按提取器实际检查的字段列出：`s_v_web_id`（提取器显式检查）、
+   `ttwid`、`sessionid` / `sessionid_ss` —— 缺 `s_v_web_id` 时会被列为「缺关键 cookie」。
+
+**仍失败时你可以做的**：
+
+- **重试一次**（间隔几十秒）——多数情况会过；
+- 用手机 App 的「分享 → 复制链接」短链（`v.douyin.com/xxx`）或浏览器地址栏里的
+  `www.douyin.com/video/<id>` 都行，两者最终走同一提取器；
+- 升级 yt-dlp 后重建镜像（`docker compose build --no-cache videorag`）——该提取器在持续修；
+- 如果你本机走的是**代理 / fake-IP（TUN）模式**（DNS 解析到 `198.18.x.x` 就是这种），
+  抖音域名的分流规则会让请求时通时断，可把 `*.douyin.com`、`*.iesdouyin.com`
+  设为直连或固定节点再试。
+
+> 另注：`--simulate` 只验证「能不能解析」，不代表能下载；抖音 CDN 仍可能对实际下载 403。
 
 ## 2. 扫码登录：三条路线的可行性
 
