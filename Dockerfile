@@ -53,6 +53,11 @@ WORKDIR /srv/app
 
 COPY pyproject.toml ./
 COPY app ./app
+
+# 先装依赖，再拷前端产物：pip install 只依赖 pyproject + app，因此**只改前端**时
+# 这一层直接命中缓存，不必重装 ~1GB 依赖树（原来 dist 在 pip 之前，改一行 CSS 也要重装）。
+RUN pip install --no-cache-dir --retries 10 --timeout 60 -i "$PIP_INDEX_URL" .
+
 COPY --from=web /web/dist ./web/dist
 
 # COPY 会原样保留构建上下文里的文件模式（不改权限），而运行期是**非 root 的 app 用户**，
@@ -60,8 +65,6 @@ COPY --from=web /web/dist ./web/dist
 # `PermissionError: .../app/api/xxx.py`（已真实踩到：本地 umask 收紧后新建的文件即 0600）。
 # 统一补「他人可读 + 目录可进入」，不依赖检出时的 umask；属主保持 root（app 用户不该改自己的代码）。
 RUN chmod -R a+rX /srv/app
-
-RUN pip install --no-cache-dir --retries 10 --timeout 60 -i "$PIP_INDEX_URL" .
 
 # 以非 root 用户运行（UID/GID 与宿主一致，见上方构建参数）
 USER app
