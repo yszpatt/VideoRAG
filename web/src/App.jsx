@@ -488,19 +488,20 @@ function Shell() {
               onClick={openImport}
               title="粘贴链接导入视频"
             >
-              ＋ 导入视频
+              ＋ <span className="import-label">导入视频</span>
             </button>
             <button
               className="theme-toggle theme-toggle-inline"
               onClick={cycle}
               title="切换主题（暗色 / 亮色 / 跟随系统）"
             >
-              主题 {THEME_META[theme] || theme}
+              <span className="theme-prefix">主题 </span>
+              {THEME_META[theme] || theme}
             </button>
             <span className={`conn-dot${online ? "" : " is-off"}`} title={online ? "服务正常" : "连接异常"} />
             <span className="conn-text">{online ? "服务正常" : "连接异常"}</span>
             <button
-              className="btn btn-ghost btn-sm"
+              className="btn btn-ghost btn-sm topbar-shortcut"
               onClick={() => window.dispatchEvent(new Event("vrag-help"))}
             >
               快捷键

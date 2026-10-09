@@ -207,15 +207,13 @@ export default function VideoCard({
     >
       <Thumb video={video} onDelete={onDelete} />
       <div className="vc-body">
-        <header className="vc-head">
-          <PlatformBadge platform={video.platform} />
-        </header>
-
         <h3 className="vc-title" title={title}>
           {title}
         </h3>
 
+        {/* 平台徽标并进 meta 行：省掉一整行高度（卡片更紧凑） */}
         <div className="vc-meta">
+          <PlatformBadge platform={video.platform} />
           {video.author && <span className="vc-author">{video.author}</span>}
           {dur && <span>{dur}</span>}
           {date && <span>{date}</span>}

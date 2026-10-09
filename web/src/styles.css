@@ -3839,3 +3839,193 @@ select.input {
 .vc-col-chip.is-default {
   color: var(--text-faint);
 }
+
+/* ---------- 视频卡片紧凑化（卡片变窄后逐行省高度） ---------- */
+.vc-body {
+  gap: 4px;
+  padding: 8px 9px 9px;
+}
+
+.vc-title {
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+/* meta 行：徽标 + 作者 + 时长/日期/播放压成一行，放不下就截断（不再换行撑高） */
+.vc-meta {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  gap: 2px 6px;
+  font-size: 10.5px;
+}
+
+.vc-meta > * {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vc-foot {
+  padding-top: 0;
+}
+
+.vc-open {
+  font-size: 10.5px;
+}
+
+.vc-foot-col {
+  font-size: 10px;
+  padding: 0 5px;
+}
+
+.vc-cols {
+  gap: 3px;
+  margin-top: 3px;
+}
+
+.vc-col-chip {
+  font-size: 10px;
+  padding: 0 5px;
+}
+
+.video-grid {
+  gap: 10px;
+}
+
+/* ---------- 手机竖屏：隐藏快捷键入口、收紧留白、卡片改横向 ---------- */
+@media (max-width: 767px) and (orientation: portrait) {
+  .topbar-shortcut {
+    display: none; /* 触屏没有物理键盘，快捷键入口没有意义 */
+  }
+  .topbar {
+    padding: 9px 12px;
+    gap: 8px;
+    row-gap: 6px;
+  }
+  .topbar-title {
+    font-size: 14px;
+  }
+  .topbar-sub {
+    display: none; /* 省一行，标题本身就够说明当前页 */
+  }
+  .topbar-right {
+    gap: 8px;
+    row-gap: 5px;
+  }
+  .content {
+    padding: 10px 10px calc(70px + env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+  .panel {
+    padding: 12px 12px 14px;
+  }
+  .library-view {
+    gap: 10px;
+  }
+  .lib-side {
+    /* 竖屏下收藏夹栏横排一行，别占一整块高度 */
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+  .lib-side-head {
+    padding: 0;
+  }
+  .lib-col-list {
+    flex: 1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+  }
+  .lib-side-foot {
+    display: none;
+  }
+  /* 卡片改横向：封面固定 116px 宽，正文占右侧——同屏能多看 1~2 张 */
+  .video-grid {
+    gap: 8px;
+  }
+  .video-card {
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .vc-thumb {
+    width: 116px;
+    flex: none;
+    aspect-ratio: 4 / 3;
+    border-bottom: none;
+    border-right: 1px solid var(--border);
+  }
+  .vc-body {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+  }
+  .vc-title {
+    -webkit-line-clamp: 2;
+  }
+}
+
+/* 竖屏窄屏：顶栏右侧按钮收成一行以内（原来会组内换行，把顶栏顶到 149px） */
+@media (max-width: 767px) and (orientation: portrait) {
+  /* 文案保持完整可读：--ui-scale 归一后 390px 下放得下（实测顶栏 48px、单行） */
+  .topbar-right .btn,
+  .topbar-right .theme-toggle {
+    padding: 4px 9px;
+    font-size: 12px;
+  }
+  /* 收藏夹栏：单行横向滚动，别再占一整块高度 */
+  .lib-side {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 5px 8px;
+    gap: 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .lib-side-head {
+    flex: none;
+    white-space: nowrap;
+    gap: 4px;
+  }
+  .lib-side-title {
+    font-size: 11.5px;
+  }
+  .lib-col-list {
+    flex: none;
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+  .lib-col-item {
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .lib-col-item.is-active {
+    border-color: var(--accent);
+  }
+  .lib-col-row {
+    flex: none;
+  }
+  .lib-col-del {
+    opacity: 1;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+/* 手机端不再整体放大：--ui-scale: 1.3 是为大屏可读性设的，在窄屏会把 390px 视口
+   压成等效 300px（触控目标 40px 渲染成 52px、卡片与顶栏同步变大），越"优化"越挤。
+   这里归一到 1，--ui-inv 会在使用处自动重算为 1。 */
+@media (max-width: 767px) {
+  :root {
+    --ui-scale: 1;
+  }
+  .topbar-right .btn,
+  .topbar-right .theme-toggle {
+    width: auto; /* 抵消 ≤640px 的 .btn{width:100%}，避免顶栏按钮撑满换行 */
+  }
+}
