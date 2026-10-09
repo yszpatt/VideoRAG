@@ -6,6 +6,10 @@
 日期：2026-08-31
 状态：待评审（规划阶段）
 
+> **端口说明（后续修订）**：本文写于对外端口统一为 **8566** 之前，当时示例用 8080。
+> 项目随后把裸机 / 桌面 / Docker 三种形态统一到 8566（见 `docker-compose.yml` 与 README），
+> 下文相关示例已同步改为 8566。
+
 ---
 
 ## 1. 定位与目标
@@ -172,7 +176,7 @@ class Transcriber(Protocol):
 - **一条命令启动**：
   ```bash
   docker run -d --name videorag \
-    -p 8080:8080 \
+    -p 8566:8566 \
     -v /path/to/videorag-data:/data \
     -e LLM_API_KEY=sk-xxx \
     -e LLM_BASE_URL=https://api.deepseek.com \
@@ -183,7 +187,7 @@ class Transcriber(Protocol):
   ```
 - **关键环境变量**：`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`、`WHISPER_MODEL`、`EMBED_MODEL`、`COOKIE_DIR`（抖音/小红书 cookie）、`MCP_API_KEY`（MCP 鉴权，可选，缺省则 MCP 不鉴权）。
 - API key 只走 env，不落库、不出现在前端。
-- MCP 端点与 Web 同端口：`http://<nas-ip>:8080/mcp`（Streamable HTTP），供外部 agent 连接。
+- MCP 端点与 Web 同端口：`http://<nas-ip>:8566/mcp`（Streamable HTTP），供外部 agent 连接。
 
 ---
 
@@ -243,14 +247,14 @@ Cline CLI（`mcpServers` 配置）：
 {
   "mcpServers": {
     "video-rag": {
-      "url": "http://<nas-ip>:8080/mcp",
+      "url": "http://<nas-ip>:8566/mcp",
       "headers": { "Authorization": "Bearer <MCP_API_KEY>" }
     }
   }
 }
 ```
 
-Reasonix / 其他支持 Streamable HTTP 的 agent 同理，指向 `http://<nas-ip>:8080/mcp` 即可。
+Reasonix / 其他支持 Streamable HTTP 的 agent 同理，指向 `http://<nas-ip>:8566/mcp` 即可。
 
 ---
 
