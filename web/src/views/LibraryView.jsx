@@ -37,6 +37,25 @@ export default function LibraryView({
   const [collections, setCollections] = useState([]);
   const [totalVideos, setTotalVideos] = useState(0);
   const [colError, setColError] = useState(null);
+  // 收藏夹栏是否收起（本地记忆；窄屏/宽屏共用同一状态）
+  const [sideCollapsed, setSideCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("vrag-lib-side") === "collapsed";
+    } catch (_) {
+      return false;
+    }
+  });
+
+  const toggleSide = () =>
+    setSideCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("vrag-lib-side", next ? "collapsed" : "open");
+      } catch (_) {
+        /* 隐私模式下 localStorage 可能不可写，忽略 */
+      }
+      return next;
+    });
 
   const loadCollections = useCallback(async () => {
     try {
@@ -141,13 +160,22 @@ export default function LibraryView({
   };
 
   return (
-    <div className="view library-view">
+    <div className={`view library-view${sideCollapsed ? " is-collapsed" : ""}`}>
+      {!sideCollapsed && (
       <aside className="lib-side">
         <div className="lib-side-head">
-          <h3 className="lib-side-title">收藏夹</h3>
-          <button className="icon-btn" onClick={onCreate} title="新建收藏夹" aria-label="新建收藏夹">
-            ＋
-          </button>
+          <h3 className="lib-side-title">
+            收藏夹
+            <span className="lib-side-count">{collections.length}</span>
+          </h3>
+          <div className="lib-side-actions">
+            <button className="icon-btn" onClick={onCreate} title="新建收藏夹（可双击条目重命名）" aria-label="新建收藏夹">
+              ＋
+            </button>
+            <button className="icon-btn" onClick={toggleSide} title="收起收藏夹栏" aria-label="收起收藏夹栏">
+              ‹
+            </button>
+          </div>
         </div>
 
         <ul className="lib-col-list">
@@ -160,6 +188,7 @@ export default function LibraryView({
               <span className="lib-col-count">{totalVideos}</span>
             </button>
           </li>
+          <li className="lib-col-sep" aria-hidden="true" />
           {collections.map((c) => (
             <li key={c.id} className="lib-col-row">
               <button
@@ -187,10 +216,11 @@ export default function LibraryView({
         </ul>
 
         {colError && <p className="lib-col-err">{colError}</p>}
-        <p className="lib-side-foot muted small">
-          新导入的视频自动进入「默认收藏夹」，可在视频卡片左上角的文件夹按钮里加入其它收藏夹。
+        <p className="lib-side-foot muted small" title="导入的视频自动进入默认收藏夹；用视频卡片页脚的「收藏夹」按钮加入其它收藏夹">
+          导入的视频自动进「默认收藏夹」
         </p>
       </aside>
+      )}
 
       <section className="panel">
         <div className="panel-head">
@@ -202,6 +232,18 @@ export default function LibraryView({
             </p>
           </div>
           <div className="panel-head-actions">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm lib-toggle"
+              onClick={toggleSide}
+              title={sideCollapsed ? "展开收藏夹栏" : "收起收藏夹栏"}
+              aria-expanded={!sideCollapsed}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+              </svg>
+              {sideCollapsed ? "收藏夹" : "收起收藏夹"}
+            </button>
             {onImport && (
               <button type="button" className="btn btn-gradient btn-sm" onClick={onImport}>
                 ＋ 导入视频

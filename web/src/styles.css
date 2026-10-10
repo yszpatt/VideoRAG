@@ -4029,3 +4029,67 @@ select.input {
     width: auto; /* 抵消 ≤640px 的 .btn{width:100%}，避免顶栏按钮撑满换行 */
   }
 }
+
+/* ---------- 收藏夹栏：收起态与布局微调 ---------- */
+.library-view.is-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.lib-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lib-toggle svg {
+  width: 13px;
+  height: 13px;
+}
+
+.lib-side-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lib-side-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lib-side-count {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-faint);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 1.6;
+}
+
+/* 「全部视频」与收藏夹之间的细分隔线 */
+.lib-col-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+/* 收起/展开时给一点过渡（网格列变化不支持 transition，这里只做侧栏淡入） */
+.lib-side {
+  animation: lib-side-in 0.14s ease;
+}
+
+@keyframes lib-side-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+}
+
+@media (max-width: 980px) {
+  /* 窄屏本来就是单列，收起时同样隐藏 */
+  .library-view.is-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
