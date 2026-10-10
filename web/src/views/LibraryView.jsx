@@ -179,7 +179,7 @@ export default function LibraryView({
         </div>
 
         <ul className="lib-col-list">
-          <li>
+          <li className="lib-col-row">
             <button
               className={`lib-col-item${activeCollection == null ? " is-active" : ""}`}
               onClick={() => onSelectCollection?.(null)}
@@ -187,6 +187,8 @@ export default function LibraryView({
               <span className="lib-col-name">全部视频</span>
               <span className="lib-col-count">{totalVideos}</span>
             </button>
+            {/* 与可删除行等宽的占位：让各行数字的右边界对齐 */}
+            <span className="lib-col-del is-ghost" aria-hidden="true" />
           </li>
           <li className="lib-col-sep" aria-hidden="true" />
           {collections.map((c) => (
@@ -201,7 +203,9 @@ export default function LibraryView({
                 {c.is_default && <span className="lib-col-tag">自动</span>}
                 <span className="lib-col-count">{c.count}</span>
               </button>
-              {!c.is_default && (
+              {c.is_default ? (
+                <span className="lib-col-del is-ghost" aria-hidden="true" />
+              ) : (
                 <button
                   className="lib-col-del"
                   onClick={() => onDeleteCollection(c)}

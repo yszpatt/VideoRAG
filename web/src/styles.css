@@ -4093,3 +4093,18 @@ select.input {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---------- 收藏夹计数列：各行右边界与数字对齐 ---------- */
+/* 不可删除的行（全部视频 / 默认收藏夹）留出与删除按钮等宽的占位，
+   否则它们的数字会比可删除行靠右 20px 左右，看起来"数字没对齐"。 */
+.lib-col-del.is-ghost {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 数字右对齐 + 等宽数字，1 / 3 / 15 也排在一条竖线上 */
+.lib-col-count {
+  min-width: 2.5ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
