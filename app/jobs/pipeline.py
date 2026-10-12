@@ -48,6 +48,24 @@ async def fetch_with_fallback(
     raise FetchError(f"all fetch providers failed for {url}: {last}")
 
 
+# 本地导入时按扩展名判断媒体类型（音频直接送 ASR；视频还能被视觉旁路复用）
+_LOCAL_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg", ".opus", ".wma")
+
+
+def _local_media(data_dir: str, local_rel: str) -> FetchedMedia | None:
+    """把本地导入的文件包成媒体。
+
+    带 ``meta["local"]=True`` 标记，供 finally 阶段识别「不要删除」；
+    视频类会走 kind="video"：视觉旁路（E3）在「媒体本身是视频」时直接复用它，
+    不会再按需下载一次。
+    """
+    path = Path(data_dir) / local_rel
+    if not path.is_file():
+        return None
+    kind = "audio" if path.suffix.lower() in _LOCAL_AUDIO_EXTS else "video"
+    return FetchedMedia(kind=kind, path=str(path), meta={"local": True})
+
+
 def _media_workdir(data_dir: str, video_id: str) -> str:
     """本次摄入专属的下载工作目录：``<DATA_DIR>/downloads/<video_id>``。
 
@@ -130,19 +148,29 @@ async def process_video(
         title = video.title or video.url
         platform = video.platform
         duration_sec = video.duration_sec
+        local_rel = video.local_path  # 本地导入文件的相对路径（platform="local"）
         # 库内已有简介：本次元数据抓取失败时的兜底（重跑不丢已入库的 meta 分片）
         description_saved = video.description
 
     media: FetchedMedia | None = None
     try:
         await _save(session_factory, video_id, status="fetching")
-        meta = await _fetch_metadata_step(session_factory, video_id, url, cookie_dir)
-        if meta:
-            title = meta.get("title") or title  # 笔记/入库用真实标题（替代 URL 兜底）
+        meta: dict | None = None  # 本地导入没有在线元数据，后续按 None 处理
+        if local_rel:
+            # 本地导入：文件已在数据目录里，跳过 yt-dlp 抓取与在线元数据。
+            # 标题/时长在导入时就写好了（文件名 / ffprobe）。
+            media = _local_media(data_dir, local_rel)
+            if media is None:
+                raise RuntimeError(f"本地文件不存在或已移动：{local_rel}")
+            logger.info("local media for %s: %s", video_id, media.path)
+        else:
+            meta = await _fetch_metadata_step(session_factory, video_id, url, cookie_dir)
+            if meta:
+                title = meta.get("title") or title  # 笔记/入库用真实标题（替代 URL 兜底）
 
-        media, _used_fetcher = await fetch_with_fallback(
-            url, _media_workdir(data_dir, video_id), fetchers
-        )
+            media, _used_fetcher = await fetch_with_fallback(
+                url, _media_workdir(data_dir, video_id), fetchers
+            )
 
         await _save(session_factory, video_id, status="transcribing")
         transcript, _used_transcriber = await transcribe_with_fallback(media, transcribers)
@@ -185,7 +213,13 @@ async def process_video(
         # 清理临时音频/视频（字幕文件保留）：成功与失败路径都清，避免转写/笔记
         # 失败时把下载的 m4a/webm 留在 data/audio、data/downloads 里积盘。
         # 仅在媒体已下载（media 非 None）且非字幕时删除。
-        if media and media.kind in ("audio", "video") and media.path:
+        # 本地导入的源文件是用户的原始文件，绝不能删（media.meta["local"] 标记）。
+        if (
+            media
+            and media.kind in ("audio", "video")
+            and media.path
+            and not media.meta.get("local")
+        ):
             # 归档已下载媒体（新增，默认关闭）：必须在删除临时文件之前执行，
             # 使成功与失败路径下「已完整下载」的文件都能留存。archive_media
             # 内部已兜底隔离异常，绝不阻断下面的清理与主流程。

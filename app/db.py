@@ -28,6 +28,8 @@ _REQUIRED_COLUMNS: dict[str, dict[str, str]] = {
         "tags": "JSON",
         "comment_count": "INTEGER",
         "meta_source": "TEXT",
+        # 本地导入：上传文件的相对路径（platform="local"）
+        "local_path": "TEXT",
     },
     "chunks": {
         # 老库 chunk 镜像表补 kind（新库由 create_all 建全）。NOT NULL + 常量默认

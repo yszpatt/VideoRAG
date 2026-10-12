@@ -35,6 +35,9 @@ class Video(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(default="pending")
     note_path: Mapped[str | None] = mapped_column(default=None)
     error: Mapped[str | None] = mapped_column(default=None)
+    # 本地导入（platform="local"）：上传文件在数据目录内的**相对路径**（如 uploads/xxx.mp4）。
+    # 存相对路径是为了数据目录整体搬迁后仍然有效（容器/裸机挂载点不同）。
+    local_path: Mapped[str | None] = mapped_column(Text, default=None)
 
     # E1 元数据（v2；老库列由 app/db.py _ensure_columns 补齐）
     description: Mapped[str | None] = mapped_column(Text, default=None)
