@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ask, listVideos, searchKnowledge, submitVideo, deleteVideo } from "./api.js";
+import { ask, listVideos, searchKnowledge, submitVideo, deleteVideo, uploadVideo } from "./api.js";
 import { isActive } from "./lib/format.js";
 import { ToastProvider, useToast } from "./hooks/useToast.jsx";
 import { go, openVideo, parseHash, useHash } from "./hooks/useHash.js";
@@ -228,7 +228,6 @@ function Shell() {
   const [online, setOnline] = useState(true);
 
   const [showImport, setShowImport] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   // 多轮会话线程：每轮 { id, question, answer, citations }；pending 为在途轮次的问题文本。
@@ -285,13 +284,11 @@ function Shell() {
     [videos],
   );
 
-  // 导入视频：支持一次多条（弹窗里每行一个链接）→ 逐条提交并汇总成败，
-  // 部分失败时保留成功的结果并如实汇报，全部失败则留在弹窗里方便改。
-  const onImportVideo = useCallback(
+  // 导入链接：批量提交并返回结果（关不关弹窗交给弹窗决定——「链接+本地文件」一起提交时
+  // 弹窗要保持打开显示上传进度）。
+  const onSubmitUrls = useCallback(
     async (urls) => {
       const list = Array.isArray(urls) ? urls : [urls];
-      if (!list.length) return;
-      setImporting(true);
       const ok = [];
       const failed = [];
       for (const u of list) {
@@ -302,25 +299,35 @@ function Shell() {
           failed.push(e.message);
         }
       }
-      setImporting(false);
-
-      if (!ok.length) {
-        push(`提交失败：${failed[0] || "未知错误"}`, "error");
-        return; // 弹窗保持打开，便于修改链接
+      if (ok.length) {
+        await refreshVideos(false);
+        go("library");
       }
-      if (failed.length) {
-        push(`已提交 ${ok.length} 个，失败 ${failed.length} 个：${failed[0]}`, "error");
-      } else {
-        push(
-          ok.length === 1 ? "已提交，开始处理" : `已提交 ${ok.length} 个视频，开始处理`,
-          "success",
-        );
-      }
-      setShowImport(false);
-      await refreshVideos(false);
-      go("library"); // 跳到视频收藏看处理进度
+      return { ok, failed };
     },
-    [push, refreshVideos],
+    [refreshVideos],
+  );
+
+  // 导入本地文件：逐个上传（原始字节流，XHR 带上传进度），返回成功/失败明细。
+  const onSubmitFiles = useCallback(
+    async (files, onProgress) => {
+      const ok = [];
+      const failed = [];
+      for (const f of files) {
+        try {
+          await uploadVideo(f, { onProgress: (p) => onProgress?.(f.name, p) });
+          ok.push(f.name);
+        } catch (e) {
+          failed.push({ name: f.name, msg: e.message });
+        }
+      }
+      if (ok.length) {
+        await refreshVideos(false);
+        go("library");
+      }
+      return { ok, failed };
+    },
+    [refreshVideos],
   );
 
   const openImport = useCallback(() => setShowImport(true), []);
@@ -565,8 +572,9 @@ function Shell() {
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
       <ImportVideoDialog
         open={showImport}
-        busy={importing}
-        onSubmit={onImportVideo}
+        onSubmitUrls={onSubmitUrls}
+        onSubmitFiles={onSubmitFiles}
+        notify={push}
         onClose={() => setShowImport(false)}
       />
     </div>

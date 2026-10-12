@@ -2,8 +2,11 @@ export const PLATFORMS = {
   bilibili: { label: "哔哩哔哩", short: "B站", color: "#FB7299" },
   youtube: { label: "YouTube", short: "YT", color: "#FF4E45" },
   douyin: { label: "抖音", short: "抖音", color: "#25F4EE" },
+  // 后端 detect_platform 返回 xhs；xiaohongshu 仅作别名兼容
+  xhs: { label: "小红书", short: "小红书", color: "#FF2442" },
   xiaohongshu: { label: "小红书", short: "小红书", color: "#FF2442" },
   generic: { label: "直链", short: "直链", color: "#8B93A7" },
+  local: { label: "本地文件", short: "本地", color: "#8B93A7" },
 };
 
 export function platformOf(key) {

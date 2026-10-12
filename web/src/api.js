@@ -165,3 +165,32 @@ export const deleteHistory = (id) =>
 
 export const clearHistory = (kind = null) =>
   request(`/api/history${kind ? `?kind=${kind}` : ""}`, { method: "DELETE" });
+
+// ---- 本地视频导入：原始字节流上传（XHR 才能拿到上传进度；fetch 不支持）----
+export function uploadVideo(file, { onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/videos/upload?filename=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch (_) {
+        /* 非 JSON 错误体（如裸 500）→ 下面用状态码兜底 */
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body) {
+        resolve(body);
+      } else {
+        const detail = body && (body.detail || body.message);
+        reject(new Error(typeof detail === "string" ? detail : `上传失败（HTTP ${xhr.status}）`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("网络请求失败"));
+    xhr.onabort = () => reject(new Error("已取消上传"));
+    xhr.send(file);
+  });
+}

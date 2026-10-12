@@ -423,9 +423,13 @@ export default function VideoDetail({ video, onClose }) {
             {views && <span>{views} 播放</span>}
             {likes && <span>{likes} 赞</span>}
             {dur && <span>时长 {dur}</span>}
-            <a href={v.url} target="_blank" rel="noreferrer" className="link">
-              打开原视频 ↗
-            </a>
+            {v.platform === "local" ? (
+              <span className="muted">本地导入</span>
+            ) : (
+              <a href={v.url} target="_blank" rel="noreferrer" className="link">
+                打开原视频 ↗
+              </a>
+            )}
           </div>
 
           <ProgressTrack progress={v.progress} />
