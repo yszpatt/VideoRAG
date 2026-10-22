@@ -3,14 +3,17 @@
 形态说明（与 ``app/main.py`` 的分工）
 --------------------------------------
 ``app/main.py`` 是 ASGI 应用工厂；本模块是**启动器**，负责环境引导、端口选择、
-日志落盘、就绪等待、窗口/浏览器呈现与优雅退出。真正的应用仍是同一个
-``create_app()``，因此 Docker 形态（``uvicorn app.main:app``）与桌面形态共用全部业务代码。
+日志落盘、就绪等待、窗口呈现与优雅退出。真正的应用仍是同一个 ``create_app()``，
+因此 Docker 形态（``uvicorn app.main:app``）与桌面形态共用全部业务代码。
 
-默认呈现方式是 **pywebview 原生窗口**（Windows 上走 Edge WebView2）——双击即出现
-应用窗口，不弹命令行、不打开浏览器。两条后备路径：
+呈现方式：**只有一个原生窗口**
+-----------------------------
+Windows 桌面包的目标形态是「双击就出一个应用窗口」，不再经过命令行、也不再
+打开浏览器。窗口由 :mod:`app.webview2_host` 提供——它直接调用 WebView2 的
+Win32/COM 接口，**不依赖 pythonnet / .NET Framework / pywebview**，因此不会再
+被 CLR 加载策略或 Desktop Runtime 缺失拖垮。
 
-- ``--browser``：用系统浏览器打开（无 WebView2 / 需要浏览器调试时）
-- ``--headless``：只起服务不开界面（CI 冒烟、当本地服务器用）
+``--headless`` 仅保留给 CI 冒烟与「当本地服务器用」的场景，不是终端用户的形态。
 
 启动顺序有硬性要求：**先 bootstrap、后 import 应用**。
 ``app/main.py`` 在模块级执行 ``app = create_app()``，那一刻就会实例化 ``Settings``
@@ -21,8 +24,7 @@
 
 用法::
 
-    videorag                                # 原生窗口（默认）
-    videorag --browser                       # 系统浏览器
+    videorag                                # 原生窗口（默认，也是唯一面向用户的形态）
     videorag --headless                      # 只起服务（CI / 当服务器用）
     videorag --port 9000                     # 指定起始端口（被占则顺延）
     videorag --data-dir D:\\vr                # 指定数据目录
@@ -37,7 +39,6 @@ import os
 import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 
 # 允许 `python app/desktop.py` 直接运行（不经 -m）
@@ -77,8 +78,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--static-dir", default=None, help="前端构建产物目录（默认自动定位）")
 
     ui = ap.add_mutually_exclusive_group()
-    ui.add_argument("--browser", action="store_true",
-                    help="用系统浏览器打开界面（默认是原生窗口；无 WebView2 时可用）")
     ui.add_argument("--headless", "--no-browser", dest="headless", action="store_true",
                     help="只起服务、不开界面（CI 冒烟 / 当本地服务器用）")
 
@@ -106,7 +105,65 @@ def _build_app(args: argparse.Namespace):
     if static_dir is None:
         log.warning("未找到 web/dist 前端产物，将以纯 API 模式启动（界面不可用）")
     settings = Settings()
+    _preflight_vector_store(settings)
     return create_app(settings=settings, static_dir=static_dir)
+
+
+def _preflight_vector_store(settings) -> None:  # noqa: ANN001
+    """启动前探测 LanceDB 能否真正打开库，失败时给可读错误。
+
+    为什么需要这一步
+    ----------------
+    LanceDB 的 Rust 层在 ``connect()`` 时就要写 spill 临时文件。若临时目录不可写，
+    它会在 **Rust 里 panic**，Python 侧只能看到
+    ``RustPanic: rust future panicked: unknown error``；而这段代码跑在
+    ``lifespan`` 启动阶段、uvicorn 尚未监听端口，于是桌面端表现为
+    「窗口白屏 / 服务在 90s 内未就绪」，日志里几乎没有线索。
+
+    在这里提前、显式地试一次连库：成功则继续（并缓存连接，避免重复打开），
+    失败则抛出带处置建议的 RuntimeError，让用户当场看到原因而不是等 90 秒。
+    """
+    try:
+        import lancedb
+
+        db_path = Path(settings.data_dir) / "lancedb"
+        db_path.mkdir(parents=True, exist_ok=True)
+        # 只做连接+列表，不建表：足以触发 Rust 侧的临时目录初始化
+        db = lancedb.connect(str(db_path))
+        # table_names() 在 lancedb 0.38 已弃用，但旧版本只有它；优先用新 API
+        if hasattr(db, "list_tables"):
+            db.list_tables()
+        else:  # pragma: no cover - 兼容旧版 lancedb
+            db.table_names()
+    except ImportError:
+        # 没装 lancedb 的形态（如纯 API 部署）不阻塞启动
+        log.debug("lancedb 未安装，跳过向量库预检")
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(_vector_store_error_text(settings, e)) from e
+
+
+def _vector_store_error_text(settings, exc: Exception) -> str:
+    """拼出用户能照着做的排查指引。"""
+    tried = ""
+    # bootstrap 阶段记录过「已尝试的临时目录」，这里把它带上：
+    # 用户不必自己猜，直接照着改环境变量即可。
+    temp_error = _LAST_TEMP_ERROR.get("text", "")
+    if temp_error:
+        tried = "\n\n" + temp_error
+    return (
+        "向量库（LanceDB）初始化失败，服务无法启动。\n\n"
+        f"错误：{type(exc).__name__}: {exc}\n\n"
+        f"当前 TEMP：{os.environ.get('TEMP')}\n"
+        f"数据目录：{settings.data_dir}\n"
+        "最常见原因是**临时目录不可写**（LanceDB 需要在那里创建 spill 文件）。\n"
+        "解决办法（任选其一）：\n"
+        "  1. 新建一个空目录（如 D:\\videorag-temp），设置环境变量\n"
+        "     VIDEORAG_TEMP_DIR 指向它，再重新启动本程序\n"
+        "  2. 或把 TEMP / TMP 指向可写目录后重新启动\n"
+        "  3. 检查磁盘空间，以及杀毒软件 / 受控文件夹访问是否拦截了这些目录\n"
+        "  4. 若数据目录本身不可写，请检查 "
+        f"{settings.data_dir} 的权限" + tried
+    )
 
 
 # ---------- 日志 ----------
@@ -118,29 +175,72 @@ def _resolve_log_file(args: argparse.Namespace, data_dir: str) -> Path | None:
     return Path(data_dir) / "logs" / "videorag.log"
 
 
-def _configure_logging(level: str, log_file: Path | None, to_console: bool) -> None:
+def _log_file_candidates(primary: Path) -> list[Path]:
+    """日志落点的候选列表（按优先级）。
+
+    为什么要有多个候选
+    ------------------
+    窗口形态没有控制台，**日志是唯一的可观测性来源**。若数据目录恰好不可写
+    （受限的企业环境、被安全软件接管、目录 ACL 异常），日志也会一起丢，
+    用户就只剩一个弹窗——上一轮排查「90 秒未就绪」时正是这种情形。
+
+    所以除了主路径，再准备几个通常可写的退路：
+    数据目录同级 → exe 同级 → 当前工作目录。
+    """
+    cands = [primary]
+    try:
+        from app import runtime_env
+
+        cands.append(runtime_env.bundle_root() / "logs" / "videorag.log")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cands.append(primary.parent.parent / (primary.parent.name + "-logs") / "videorag.log")
+    except Exception:  # noqa: BLE001
+        pass
+    cands.append(Path.cwd() / "videorag.log")
+    return cands
+
+
+def _configure_logging(level: str, log_file: Path | None, to_console: bool) -> Path | None:
     """统一配置 root logger。
 
     窗口模式没有控制台，日志必须落文件——否则「应用起不来」对用户就是个黑盒。
     uvicorn 侧用 ``log_config=None`` 接入同一套配置（见 _serve_in_thread）。
+
+    返回**实际生效**的日志路径（用于在错误提示里告诉用户去哪看）。
     """
     handlers: list[logging.Handler] = []
     if to_console and sys.stderr is not None:
         handlers.append(logging.StreamHandler(sys.stderr))
+    effective: Path | None = None
     if log_file is not None:
-        try:
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
-        except OSError as e:
+        for cand in _log_file_candidates(log_file):
+            try:
+                cand.parent.mkdir(parents=True, exist_ok=True)
+                # 真正打开一次，确认可写（mkdir 成功不代表能建文件）
+                probe = cand.parent / (cand.name + ".probe")
+                probe.write_bytes(b"")
+                probe.unlink(missing_ok=True)
+                handlers.append(logging.FileHandler(cand, encoding="utf-8"))
+                effective = cand
+                break
+            except OSError:
+                continue
+        if effective is None:
             # 落盘失败不应阻断启动：退回控制台
             handlers.append(logging.StreamHandler(sys.stderr))
-            log.warning("日志文件不可写（%s），仅输出到控制台：%s", log_file, e)
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         handlers=handlers or [logging.NullHandler()],
         force=True,
     )
+    if log_file is not None and effective is None:
+        logging.getLogger("videorag.desktop").warning(
+            "日志文件不可写（%s），仅输出到控制台", log_file
+        )
+    return effective
 
 
 def _fatal(message: str, log_file: Path | None) -> None:
@@ -188,17 +288,12 @@ def _existing_instance(host: str, port: int) -> str | None:
 
 
 def _open_existing(url: str, args: argparse.Namespace) -> int:
-    """复用已在运行的实例：只把界面打开，不再起第二个服务。
+    """复用已在运行的实例：只把界面窗口打开，不再起第二个服务。
 
-    不在这里等窗口关闭——服务是别人的，我们只是「打开界面」这一次动作，做完就退出。
+    不在这里等窗口关闭——服务是别人的，我们只是「打开界面」这一次动作，
+    窗口关闭后本进程即退出。
     """
-    if _open_app_window(url, args):
-        return 0
-    try:
-        webbrowser.open(url)
-    except Exception as e:  # noqa: BLE001
-        log.warning("自动打开浏览器失败：%s", e)
-    return 0
+    return _run_window(url, args, None, None)
 
 
 def _wait_ready_sync(host: str, port: int, timeout: float) -> bool:
@@ -261,33 +356,41 @@ def _probe_ffmpeg() -> tuple[str, bool, str]:
 def _probe_webview() -> tuple[str, bool, str]:
     """检查原生窗口是否**真的能起来**。
 
-    踩过的坑：原先只 import ``webview.platforms.edgechromium`` 就判定可用，但那只验证了
-    **渲染层**；Windows 上的**宿主窗口**是 ``webview.platforms.winforms``，它依赖
-    pythonnet + .NET 6+ Desktop Runtime。缺 .NET 时 clr_loader 会退到 netfx 路径去加载
-    CoreCLR 版的 Python.Runtime.dll，报
-    ``Failed to resolve Python.Runtime.Loader.Initialize``。
-    结果是：探针在缺 .NET 的机器上依然报 PASS，而用户那边窗口根本起不来。
-    现在改为实际加载宿主窗口模块——那才是「窗口能不能开」的判据。
+    历史教训：早期实现走 pywebview → pythonnet → .NET Framework，探针只验证
+    「模块能否 import」就报 PASS，而真机上窗口根本起不来——失败点其实在 CLR
+    加载（netfx 的 CAS 策略会拒绝加载被判定为「网络位置」的
+    ``Python.Runtime.dll``，报 ``Failed to resolve Python.Runtime.Loader.Initialize``；
+    改走 CoreCLR 又因为 .NET 5+ 移除了 ``System.Windows.Forms.ContextMenu``
+    而无法实例化 WinForms 版 WebView2 控件）。
+
+    现在窗口走 :mod:`app.webview2_host`，判据因此必须是**能不能真的建出环境**：
+    只查 loader 与版本号还不够——真机上出现过「版本号读得到、目录也在，但任何进程
+    都建不出环境（``0x80070002``）」，那正是窗口白屏的直接原因。所以这里做一次
+    真实的 ``CreateCoreWebView2EnvironmentWithOptions``。
     """
     try:
-        import webview  # noqa: F401
+        from app import webview2_host
     except Exception as e:  # noqa: BLE001
-        return ("webview backend", False, f"pywebview 不可用: {type(e).__name__}")
+        return ("webview2 backend", False, f"模块不可用: {type(e).__name__}: {e}")
 
     if os.name != "nt":
-        # 非 Windows 走各自的原生后端，这里只确认 pywebview 可导入
-        return ("webview backend", True, "pywebview")
+        return ("webview2 backend", False, "原生窗口仅支持 Windows")
 
-    try:
-        # 真正的窗口实现（WinForms 宿主 + WebView2 渲染），需要 pythonnet/.NET
-        import webview.platforms.winforms  # noqa: F401
-    except Exception as e:  # noqa: BLE001
+    loader = webview2_host.find_loader_dll()
+    if loader is None:
+        return ("webview2 backend", False, "未找到 WebView2Loader.dll（应随包在 vendor/webview2）")
+
+    version = webview2_host.webview2_runtime_version()
+    if not version:
         return (
-            "webview backend",
+            "webview2 backend",
             False,
-            f"缺 .NET 6+ Desktop Runtime（{type(e).__name__}: {str(e)[:48]}）",
+            f"未安装 WebView2 Runtime（下载：{webview2_host.WEBVIEW2_DOWNLOAD_URL}）",
         )
-    return ("webview backend", True, "WinForms + EdgeChromium (WebView2)")
+    ok, detail = webview2_host.probe_environment()
+    if not ok:
+        return ("webview2 backend", False, f"Runtime {version} 不可用：{detail}")
+    return ("webview2 backend", True, f"WebView2 Runtime {version}（{detail}）")
 
 
 def _probe_sherpa() -> tuple[str, bool, str]:
@@ -435,110 +538,6 @@ def _parse_window_size(text: str) -> tuple[int, int]:
         return WINDOW_SIZE
 
 
-def _find_browser_exe() -> str | None:
-    """找一个能开 ``--app`` 窗口的 Chromium 系浏览器（Edge 优先，Windows 自带）。"""
-    from shutil import which
-
-    for name in ("msedge", "msedge.exe", "chrome", "chrome.exe"):
-        found = which(name)
-        if found:
-            return found
-    # which 依赖 PATH，Windows 上 Edge 常不在 PATH 里，补几个标准安装路径
-    for path in (
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ):
-        if Path(path).is_file():
-            return path
-    return None
-
-
-def _open_app_window(url: str, args: argparse.Namespace) -> bool:
-    """用 Chromium 的 ``--app`` 模式开一个无地址栏、无标签页的独立窗口。
-
-    为什么需要这条降级：原生窗口依赖 .NET 6+ Desktop Runtime（经 pythonnet），
-    缺了就完全起不来（另一台机器上实际发生过）。而 ``--app`` 窗口观感接近原生
-    ——没有地址栏和标签页，就是一个独立应用窗口——且**零额外依赖**：
-    Windows 10/11 都自带 Edge。
-
-    注意：这样开的窗口关掉后我们感知不到，服务会继续在后台运行；
-    日志里会打印界面地址，需要停止时用 Ctrl+C 或任务管理器结束进程。
-    """
-    import subprocess
-
-    exe = _find_browser_exe()
-    if exe is None:
-        log.warning("未找到 Edge / Chrome，无法使用应用模式窗口")
-        return False
-
-    # 独立 profile：避免与用户日常浏览器的会话 / 扩展 / 代理设置互相影响
-    profile = Path(runtime_env.resolve_data_dir(args.data_dir)) / "browser-profile"
-    size = _parse_window_size(args.window_size)
-    try:
-        profile.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
-            [
-                exe,
-                f"--app={url}",
-                f"--window-size={size[0]},{size[1]}",
-                f"--user-data-dir={profile}",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("应用模式窗口启动失败：%s", e)
-        return False
-    log.info("已用浏览器应用模式打开界面（无地址栏窗口）")
-    return True
-
-
-def _try_native_window(url: str, args: argparse.Namespace, log_file: Path | None) -> bool:
-    """尝试 pywebview 原生窗口；阻塞到窗口关闭。成功返回 True。
-
-    失败只记日志并返回 False，由调用方决定怎么降级——不要在这里直接报错退出。
-    """
-    try:
-        import webview
-    except Exception as e:  # noqa: BLE001
-        log.warning("pywebview 不可用（%s）", e)
-        return False
-
-    size = _parse_window_size(args.window_size)
-    storage = Path(runtime_env.resolve_data_dir(args.data_dir)) / "webview"
-    icon = runtime_env.find_app_icon()
-    if icon is None:
-        log.warning("未找到应用图标（assets/videorag.ico），窗口将沿用默认图标")
-    try:
-        storage.mkdir(parents=True, exist_ok=True)
-        webview.create_window(
-            "videoRAG",
-            url,
-            width=size[0],
-            height=size[1],
-            min_size=WINDOW_MIN_SIZE,
-            background_color=WINDOW_BG,
-        )
-        # 显式指定 Edge 后端：避免在缺少 WebView2 的机器上静默回落到老旧内核。
-        # icon 也必须在这里给：exe 的 PE 资源图标只影响资源管理器/快捷方式，
-        # 窗口与任务栏图标要由程序自己设置（Windows 的 WM_SETICON）。
-        webview.start(
-            gui="edgechromium",
-            private_mode=False,
-            storage_path=str(storage),
-            icon=str(icon) if icon else None,
-        )
-        return True
-    except Exception as e:  # noqa: BLE001
-        # 最常见的失败原因：缺 .NET 6+ Desktop Runtime（pythonnet 加载不了）
-        log.exception("原生窗口启动失败：%s", e)
-        if log_file:
-            log.info("可安装 .NET 6+ Desktop Runtime 以启用原生窗口；本次将改用应用模式窗口")
-        return False
-
-
 def _wait_until_stopped(holder: dict, done: threading.Event) -> int:
     """驻留等待服务结束（Ctrl+C / 被终止），然后收尾。"""
     try:
@@ -550,51 +549,124 @@ def _wait_until_stopped(holder: dict, done: threading.Event) -> int:
     return 0
 
 
-def _run_window(url: str, args: argparse.Namespace, holder: dict, done: threading.Event,
-                log_file: Path | None) -> int:
-    """窗口形态的编排：原生窗口 → 应用模式窗口 → 系统浏览器标签页。
+def _run_window(url: str, args: argparse.Namespace, holder: dict | None,
+                done: threading.Event | None) -> int:
+    """打开原生应用窗口，阻塞到窗口关闭。
 
-    三级降级是刻意的。原生窗口体验最好但依赖 .NET 6+ Desktop Runtime；
-    ``--app`` 窗口几乎一样（无地址栏/标签页）却零依赖；最后才退到普通标签页，
-    保证「无论如何用户都能用上」。
+    窗口由 :mod:`app.webview2_host` 提供（直连 WebView2 的 Win32/COM 接口），
+    因此**不需要** pythonnet、.NET Framework 或 pywebview。窗口关闭后，如果本进程
+    还带着本地服务（``holder`` 非空），一并通知它退出。
+
+    刻意**不再降级到浏览器**：桌面版的目标形态就是「一个应用程序窗口」。窗口起不来
+    时直接给出可读错误（含 WebView2 下载地址）并写日志，而不是偷偷换成浏览器——
+    后者会让用户以为「装错了东西」。
     """
-    if _try_native_window(url, args, log_file):
-        _shutdown(holder, done)
-        return 0
+    from app import webview2_host
 
-    if _open_app_window(url, args):
-        return _wait_until_stopped(holder, done)
+    size = _parse_window_size(args.window_size)
+    storage = Path(runtime_env.resolve_data_dir(args.data_dir)) / "webview"
+    icon = runtime_env.find_app_icon()
+    if icon is None:
+        log.warning("未找到应用图标（assets/videorag.ico），窗口将沿用默认图标")
 
-    _fatal(
-        "原生窗口不可用，且未找到 Edge / Chrome。\n\n将改用系统浏览器打开。"
-        "（建议安装 .NET 6+ Desktop Runtime 以启用原生窗口）",
-        log_file,
-    )
-    return _run_browser(url, holder, done)
-
-
-def _run_browser(url: str, holder: dict, done: threading.Event) -> int:
-    """系统浏览器模式：打开后驻留，直到服务结束（Ctrl+C / 被终止）。"""
-    log.info("界面地址：%s", url)
     try:
-        webbrowser.open(url)
-    except Exception as e:  # noqa: BLE001  打开失败不致命，用户可手动访问
-        log.warning("自动打开浏览器失败：%s", e)
-    return _wait_until_stopped(holder, done)
+        storage.mkdir(parents=True, exist_ok=True)
+        rc = webview2_host.run_window(
+            url,
+            title="videoRAG",
+            width=size[0],
+            height=size[1],
+            min_size=WINDOW_MIN_SIZE,
+            background=_bg_rgb(),
+            icon=icon,
+            storage_dir=storage,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("原生窗口启动失败：%s", e)
+        # 文案与宿主内的失败弹窗共用同一份组装逻辑（含诊断 + 处置步骤），
+        # 避免「同一个故障从这里起和从宿主起说法不一样」。
+        _fatal(webview2_host.window_failure_text(f"{type(e).__name__}: {e}"), None)
+        return 1
+
+    # 窗口已关闭：若本地服务仍在本进程里，通知它退出
+    if holder is not None and done is not None:
+        _shutdown(holder, done)
+    return rc
+
+
+def _bg_rgb() -> tuple[int, int, int]:
+    """把 ``#RRGGBB`` 形式的窗口底色转成 RGB 三元组。"""
+    text = WINDOW_BG.lstrip("#")
+    if len(text) == 6:
+        try:
+            return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+        except ValueError:
+            pass
+    return (0x14, 0x17, 0x1C)
 
 
 # ---------- 主流程 ----------
 
+#: bootstrap 阶段「临时目录探测失败」的详情，供错误提示复用。
+#: 单独记一份是因为 preflight 发生在更后面，那时已经拿不到当时的上下文。
+_LAST_TEMP_ERROR: dict[str, str] = {}
+
+
 def _run(args: argparse.Namespace) -> int:
-    info = runtime_env.bootstrap(args.data_dir, use_hf_mirror=args.hf_mirror)
+    # ---- 第一步：先把日志落盘 ----
+    # 顺序很重要：环境准备（数据目录/临时目录探测）可能失败，而**只有日志先就位，
+    # 失败才留得下痕迹**。此前顺序相反，用户看到的只有一个 PyInstaller 弹窗，
+    # 日志文件里连一行都没有。
+    #
+    # 这一步只用「数据目录」这一个信息（不依赖 bootstrap），因此失败概率极低；
+    # 万一连它都失败，就退回控制台输出。
+    data_dir = runtime_env.resolve_data_dir(args.data_dir)
+    log_file = _resolve_log_file(args, data_dir)
+    # 实际生效的日志路径（可能因主路径不可写而落到备选位置），
+    # 错误提示里要告诉用户「去哪看日志」。
+    effective_log = _configure_logging(
+        args.log_level, log_file, to_console=not args.headless and sys.stderr is not None
+    )
+    if effective_log is not None and effective_log != log_file:
+        log.warning("日志改写到：%s（主路径不可写）", effective_log)
+
+    # ---- 第二步：环境准备（可能失败）----
+    try:
+        info = runtime_env.bootstrap(args.data_dir, use_hf_mirror=args.hf_mirror)
+    except Exception as e:  # noqa: BLE001
+        log.exception("环境初始化失败")
+        _fatal(str(e), effective_log)
+        return 1
+
     info["asr_backend"] = _apply_desktop_defaults()
 
-    log_file = _resolve_log_file(args, info["data_dir"])
-    # 窗口模式没有控制台，日志只落文件；其他形态同时打屏，便于调试
-    _configure_logging(args.log_level, log_file, to_console=not args.headless and sys.stderr is not None)
+    # 数据目录可能被降级到备选位置：此时日志也应跟着换位置，否则用户
+    # 去默认位置找不到日志。
+    #
+    # 换位置本身有个副作用：日志会被**切成两个文件**。排查时只看第一个
+    # 就会以为「日志到这就断了」（这一条是真实踩过的坑）。因此切换前后
+    # 各写一行，保证任一文件都能指出另一半在哪。
+    if info["data_dir"] != data_dir:
+        data_dir = info["data_dir"]
+        new_log = _resolve_log_file(args, data_dir)
+        log.warning("数据目录已改为 %s，后续日志将写入：%s", data_dir, new_log)
+        moved = _configure_logging(
+            args.log_level, new_log, to_console=not args.headless and sys.stderr is not None
+        )
+        if moved is not None:
+            effective_log = moved
+            log.warning(
+                "日志在此继续（前面的启动日志在另一处：原数据目录不可写导致切换）"
+            )
 
     log.info("videoRAG 启动")
     log.info("运行环境：\n%s", runtime_env.format_summary(info))
+
+    # 临时目录探测失败：不立刻终止，把原因记录下来。
+    # 真正用不了向量库时，_preflight_vector_store 会给出更贴近现场的提示。
+    if info.get("temp_error"):
+        log.warning("未找到可写的临时目录：\n%s", info["temp_error"])
+        _LAST_TEMP_ERROR["text"] = info["temp_error"]
 
     # 目标端口上已有实例 → 直接复用它的界面，不再起第二个服务。
     # （双开会让两个进程共写同一个数据目录，SQLite / LanceDB 有损坏风险）
@@ -604,7 +676,15 @@ def _run(args: argparse.Namespace) -> int:
             log.info("检测到已有实例正在运行（%s），直接打开它的界面", existing)
             return _open_existing(existing, args)
 
-    app = _build_app(args)
+    # 构造应用：这一步会真正打开 LanceDB。失败时立刻弹窗/记日志，
+    # 而不是让服务线程卡在 lifespan 里、90 秒后才报「未就绪」。
+    try:
+        app = _build_app(args)
+    except Exception as e:  # noqa: BLE001
+        log.exception("应用初始化失败")
+        _fatal(str(e), effective_log)
+        return 1
+
     port = runtime_env.find_free_port(args.port, args.host)
     if port != args.port:
         log.info("端口 %s 被占用，改用 %s", args.port, port)
@@ -619,7 +699,7 @@ def _run(args: argparse.Namespace) -> int:
     thread.start()
 
     if not _wait_ready_sync(args.host, port, args.open_timeout):
-        _fatal(f"服务在 {args.open_timeout:.0f}s 内未就绪（端口 {port}）。", log_file)
+        _fatal(f"服务在 {args.open_timeout:.0f}s 内未就绪（端口 {port}）。", effective_log)
         _shutdown(holder, done, timeout=3)
         return 1
 
@@ -646,10 +726,7 @@ def _run(args: argparse.Namespace) -> int:
             _shutdown(holder, done)
         return 0
 
-    if args.browser:
-        return _run_browser(url, holder, done)
-
-    return _run_window(url, args, holder, done, log_file)
+    return _run_window(url, args, holder, done)
 
 
 def main(argv: list[str] | None = None) -> int:
