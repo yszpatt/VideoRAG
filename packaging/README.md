@@ -25,7 +25,7 @@ pwsh -File packaging/build-windows.ps1
 
 | 文件 | 作用 |
 |---|---|
-| `videorag.spec` | PyInstaller 配置（onedir + 双入口）。**原生包与 pywebview 的收集规则都在这里**，出问题先看它 |
+| `videorag.spec` | PyInstaller 配置（onedir，单一窗口入口）。**原生包与 WebView2Loader 的收集规则都在这里**，出问题先看它 |
 | `vendor-ffmpeg.ps1` | 下载 ffmpeg / ffprobe 静态构建到 `vendor/ffmpeg/`（不进仓库） |
 | `build-windows.ps1` | 一键构建编排（本地与 CI 共用同一份逻辑） |
 | `make_logo.py` | 生成品牌标识与所有图标（SVG / PNG / ICO），几何参数单一来源 |
@@ -61,9 +61,10 @@ pwsh -File packaging/build-windows.ps1
 >
 > 1. **exe 文件图标**（资源管理器 / 快捷方式看到）——构建时嵌入 PE 资源，
 >    改了 logo **必须重新打包**；
-> 2. **窗口标题栏 / 任务栏图标**——是另一回事，由 `app/desktop.py` 运行时经 pywebview 的
->    `icon=` 设置，图标文件由 spec 放进 `_internal/assets/`。**只改 1 不改 2，窗口图标依旧是
->    解释器的默认图标**（这是实际踩过的坑）；
+> 2. **窗口标题栏 / 任务栏图标**——是另一回事，由 `app/desktop.py` 运行时交给
+>    `app/webview2_host.py`（Win32 `LoadImageW` + 窗口类 `hIcon`）设置，图标文件由
+>    spec 放进 `_internal/assets/`。**只改 1 不改 2，窗口图标依旧是系统的默认图标**
+>    （这是实际踩过的坑）；
 > 3. **界面里的 logo**——前端资源，重新 `npm run build` 即可。
 >
 > 另外：SVG 必须是**纯 ASCII**（`make_logo.py` 启动时会自校验）。前端打包器会把小 SVG
@@ -74,28 +75,29 @@ pwsh -File packaging/build-windows.ps1
 ```
 dist/
 ├── videoRAG/                        # 目录形态，可直接运行
-│   ├── videorag.exe                 # 窗口形态（双击这个）：原生窗口，无控制台
-│   ├── videorag-cli.exe             # 控制台形态：排障 / --self-test / --headless
+│   ├── videorag.exe                 # 唯一入口（双击这个）：原生窗口，无控制台
 │   ├── _internal/                   # Python 运行时 + app + web/dist + 全部依赖
-│   └── vendor/ffmpeg/               # ffmpeg.exe / ffprobe.exe（启动时注入 PATH）
+│   │   └── vendor/webview2/         # WebView2Loader.dll（定位系统 WebView2 Runtime）
+│   └── vendor/ffmpeg/               # ffmpeg.exe（启动时注入 PATH；不含 ffprobe）
 └── videoRAG-<版本>-windows-x64.zip  # 分发包
 ```
 
-**为什么是两个 exe**：
+**为什么发布包只有一个 exe**：桌面版的形态就是「一个应用程序窗口」。用户双击
+`videorag.exe` 就得到窗口，不需要命令行、也不经过浏览器。
 
-- 窗口形态必须 `console=False`（否则双击会先弹一个命令行黑框），而这种进程**没有可用的
-  stdout 句柄**——`--self-test` 的结论根本打不出来，CI 也没法读；
-- 控制台形态用于 CI 冒烟、命令行排障、`--headless` 当服务器。
-
-两者共用同一个 `Analysis`/`PYZ`，只是 bootloader 的 `console` 开关不同，体积代价可忽略。
+代价是窗口形态必须 `console=False`（否则双击会先弹一个黑框），而这种进程**没有可用的
+stdout 句柄**——`--self-test` 的结论打不出来。解决办法不是把控制台入口塞进发布包，
+而是**按需临时构建**：`build-windows.ps1` 在冒烟步骤用 `VIDEORAG_BUILD_CLI=1` 让
+同一份 spec 产出 `videorag-cli.exe`，跑完自检立即删除，zip 里始终只有一个 exe。
+spec 是 Python 脚本，因此「一份 spec、两种入口」不需要维护两份配置。
 
 ## 运行时形态
 
 | | Docker | 桌面包 |
 |---|---|---|
 | 入口 | `uvicorn app.main:app` | `app/desktop.py` |
-| 界面 | 浏览器访问 `:8566` | 原生窗口（Edge WebView2，经 pywebview） |
-| 默认端口 | 8566（compose 端口映射） | **8566**（被占自动顺延；避开最易冲突的 8566） |
+| 界面 | 浏览器访问 `:8566` | 原生窗口（直连 WebView2 Win32/COM，**不经 .NET**） |
+| 默认端口 | 8566（compose 端口映射） | **8566**（被占自动顺延；避开最易冲突的 8080） |
 | ffmpeg | 镜像内 apt 安装 | 随包 `vendor/ffmpeg`，启动注入 PATH |
 | 数据目录 | `/data`（compose 注入） | `%LOCALAPPDATA%\videoRAG` |
 | 本地 ASR | 侧车容器 HTTP `http://asr:9991` | 进程内 sherpa-onnx（`ASR_LOCAL_BACKEND=inproc`） |
@@ -116,8 +118,10 @@ dist/
 ## 冒烟测试
 
 ```powershell
-# 用控制台版（窗口版的 stdout 是 None，看不到结果）
-dist\videoRAG\videorag-cli.exe --self-test --data-dir <临时目录>
+# 先单独构建控制台入口（发布包里不含它，仅为冒烟/排障）
+$env:VIDEORAG_BUILD_CLI = '1'
+.venv\Scripts\python.exe -m PyInstaller packaging/videorag.spec --noconfirm --distpath dist --workpath build-cli
+dist\videoRAG-cli\videorag-cli.exe --self-test --data-dir <临时目录>
 ```
 
 它会检查：`ffmpeg` / `yt-dlp` / `sherpa-onnx` / WebView2 后端 / `/health` /
@@ -129,22 +133,31 @@ dist\videoRAG\videorag-cli.exe --self-test --data-dir <临时目录>
 ## 系统要求
 
 - Windows 10 1803+ / Windows 11
-- **WebView2 Runtime**（Win11 与多数 Win10 已自带）
-- **.NET 6+ Desktop Runtime** —— 注意是 **Desktop** 而不是 Console 运行时：
-  pywebview 的 WinForms 宿主窗口需要桌面框架。开发机通常已装，**干净系统可能没有**
+- **Microsoft Edge WebView2 Runtime**（Win11 与多数 Win10 已自带；缺失时从
+  [官方页面](https://developer.microsoft.com/microsoft-edge/webview2/) 安装）
+- **不需要 .NET**。这一点是本包与早期版本的关键差别，见下。
 
-窗口有三级降级链，会自动进行、不会崩：
+窗口只有一种形态：WebView2 原生窗口（`app/webview2_host.py`，纯 ctypes + COM）。
+**没有浏览器降级**——窗口起不来时直接弹窗说明原因并写日志，不会偷偷开浏览器。
 
-| 顺序 | 形态 | 依赖 |
-|---|---|---|
-| 1 | pywebview 原生窗口 | WebView2 + .NET 6+ **Desktop** Runtime |
-| 2 | 浏览器 `--app` 窗口（无地址栏 / 无标签页，观感接近原生） | 只需 Edge 或 Chrome（Windows 自带 Edge） |
-| 3 | 系统浏览器标签页 | 任意默认浏览器 |
-
-> **踩过的坑**：`_probe_webview()` 原先只 import `webview.platforms.edgechromium`（**渲染层**，
-> 不需要 .NET）就报 PASS，但 Windows 上真正的窗口实现是 `webview.platforms.winforms`
-> ——它依赖 pythonnet + .NET。于是在缺 .NET 的机器上出现「自检全绿、窗口起不来」。
-> 现在探针直接加载 winforms 模块，并把缺失原因写进自检输出。
+> **踩过的坑（两代故障，都是窗口起不来）**
+>
+> 1. 早期用 pywebview，Windows 上走 `webview.platforms.winforms` → `pythonnet` →
+>    .NET Framework。`clr_loader` 默认选 netfx，用 `Assembly.LoadFrom` 加载
+>    `Python.Runtime.dll`；当该路径被 .NET 判定为「网络位置」时会触发 CAS 策略拒绝
+>    （`0x80131515` / `loadFromRemoteSources`），报
+>    `Failed to resolve Python.Runtime.Loader.Initialize`。**装任何 .NET Desktop
+>    Runtime 都无济于事**，因为失败发生在加载策略而不是运行时缺失。
+> 2. 想改走 CoreCLR 也不行：`System.Windows.Forms.ContextMenu` 在 .NET 5+ 已被移除，
+>    WinForms 版 WebView2 控件在 CoreCLR 下无法实例化（`TypeLoadException`）。
+>
+> 结论：WinForms 宿主只能跑在 .NET Framework 上，而 .NET Framework 的加载策略不可控。
+> 现在的做法是**完全绕开 CLR**，直接调 WebView2 的 COM 接口（`ICoreWebView2Environment`
+> → `ICoreWebView2Controller` → `ICoreWebView2`），因此 pythonnet / clr_loader /
+> pywebview 都不再需要，spec 里已显式 `excludes`。
+>
+> 自检里的 `webview2 backend` 项现在直接验证两件事：`WebView2Loader.dll` 能否定位、
+> WebView2 Runtime 是否装了。这比「模块能否 import」可靠得多。
 
 另外启动时会检测目标端口上是否已有实例：若已有，**只打开它的界面、不再起第二个服务**
 （双开会让两个进程共写同一个数据目录，SQLite / LanceDB 有损坏风险）。
@@ -171,26 +184,84 @@ uv 在 Windows 上创建 console script 的 trampoline exe 时需要改写 PE �
 上一版应用还在运行，文件被占用删不掉。先关掉窗口再打包，
 或用 `--distpath dist-next` 打到旁边目录。
 
-**Q：窗口没弹出来，反而开了浏览器**
-看日志 `<数据目录>\logs\videorag.log`。常见原因：WebView2 Runtime 缺失、
-.NET 6+ 缺失、或 `pywebview`/`pythonnet` 未被正确收集。
-用 `videorag-cli.exe --self-test` 可直接看到 `webview backend` 那一项。
+**Q：窗口没弹出来**
+看日志 `<数据目录>\logs\videorag.log`（注意：数据目录若被降级，后半段日志在
+**新数据目录**下的 `logs/videorag.log`，两处都会写明切换）。按提示区分三种情况：
+
+| 现象 | 真实原因 | 处理 |
+|---|---|---|
+| 提示「未检测到 WebView2 Runtime」 | 确实没装 | 装 Evergreen 运行时 |
+| 提示「已检测到…但无法创建环境」 | **位数不一致**（64 位程序配了 32 位运行时）或安装不完整 | 装 **x64** 版运行时 / 修复安装 |
+| 同上，且日志里 `0x80070002` | 运行时目录存在但不可用 | 同上 |
+
+位数是高频坑：`msedgewebview2.exe` 若是 x86 而程序是 x64，**任何** loader 都会
+返回 `0x80070002`（看着像「没装」）。现在启动时会比对 PE 头位数并直接跳过
+不匹配的目录，弹窗里也会写明。
+
+用 `videorag-cli.exe --self-test` 可看到 `webview2 backend` 那一项——它现在做
+**真实的环境创建**，而不是只看版本号。**注意不会再回落到浏览器**——桌面版只有
+窗口这一种形态。
+
+**Q：窗口起来了，但一片灰/白，没有内容**
+这是 COM 引用计数的坑，已在 `app/webview2_host.py::_addref` 里修掉，改动前务必
+读那段注释：WebView2 异步创建回调传进来的 `environment` / `controller` 是**借用
+引用**，回调返回后运行时就 Release 了。不先 `AddRef` 直接存下来，浏览器进程会
+**干净地退出**（事件日志里连崩溃记录都没有），`Navigate` 仍返回 `S_OK`、但
+`get_Source` 永远停在 `about:blank`——表现就是「窗口灰屏、服务端一个请求都没收到」。
+
+**Q：程序在 `C:\workspace\...` 能跑，放到别处就不行（或反过来）**
+先看日志里有没有「数据目录 … 不可用」。部分安全软件（如腾讯电脑管家）会拦截
+**未签名程序**对用户目录的写入，此时 `%LOCALAPPDATA%\videoRAG` 会写不进去，程序
+自动降级到 `<exe 同级>/data` 并在日志里说明。把 `videorag.exe` 加入其信任区即可
+恢复默认位置；否则两个位置的数据目录是**两套**（旧库不会自动迁移）。
+
+**Q：窗口是一片纯色（蓝色/深色），但服务正常、日志显示「服务就绪」**
+先看 **`msedgewebview2.exe` 进程数是不是 0**——如果是，说明 WebView2 的浏览器
+子进程根本没起来，窗口里只有我们设的背景色。
+
+最常见的原因不是代码，而是**程序所在目录带 Low 完整性标签**（`Mandatory Label\
+Low Mandatory Level`）。Windows 的完整性机制规定：进程的完整性级别不会高于它
+所在可执行文件的目录，所以放在这种目录里的 exe 会被降级成 Low，而 WebView2 自带
+沙箱的浏览器进程无法在 Low 父进程下启动。
+
+用 `icacls <目录>` 确认有没有 `Low Mandatory Level`。这种情况常见于：
+- DSH / Codex 之类工具的**沙箱工作区**（它会主动给目录打 Low 标签来做写入隔离）；
+- 某些企业策略目录。
+
+**解决办法就是把发布包解压到普通目录**（如 `C:\Project\videoRAG`）再运行。
+同一份 exe 在 `C:\Project` 下 WebView2 子进程有十几个、页面正常；复制到沙箱工作区
+就变成 0 个——这不是版本或代码差异。
 
 **Q：包体积能再小吗？**
-已默认排除 faster-whisper 保留档（连带 `ctranslate2` + `av`，省约 **124MB**），
-当前解压约 **961MB**。最大的单文件是 lancedb 的 `_lancedb.pyd`（297MB，
-上游 Rust 扩展固有体积，配置层面无解）。
+已默认排除 faster-whisper 保留档（连带 `ctranslate2` + `av`，省约 **124MB**）。
+当前实测：解压 **781MB** / zip **293MB**。
 
-其余可裁项及代价（按性价比排序）：
+已实施的裁剪（都在 `videorag.spec` 里，带注释）：
+
+| 项 | 省 | 依据 |
+|---|---|---|
+| `ffprobe.exe` 不随包 | **98MB** | 它只用于取时长；`_probe_duration` 已改为缺失时用 `ffmpeg -i` 的输出解析（有测试覆盖） |
+| `cv2/opencv_videoio_ffmpeg*.dll` | **29MB** | 项目没有任何 `cv2.VideoCapture`/`VideoWriter`；抽帧走 ffmpeg 子进程 |
+| `pyarrow/plasma` | 0.5MB | Plasma 共享内存存储，未使用 |
+| `pywebview` / `pythonnet` / `clr_loader` | ~10MB | 窗口改为直连 WebView2 COM，不再需要 CLR 桥 |
+
+**不能删的**：`pyarrow/arrow_dataset.dll` —— lancedb 的 `common.py` 直接
+`import pyarrow.dataset`，删掉整个应用启动即失败（实测过）。`arrow_flight`
+保守保留（收益 14MB，但无法确认 lancedb 是否间接用到）。
+
+剩下最大的是 `_lancedb.pyd`（296MB，上游 Rust 扩展固有体积，配置层面无解）。
+
+其余可裁项及代价：
 
 | 策略 | 可省 | 代价 |
 |---|---|---|
-| 排除视觉旁路（`cv2` + `rapidocr`） | ~128MB | 失去「无语音视频画面文字识别」（MV / PPT 录屏场景） |
-| ffmpeg 改首启下载（不随包） | ~196MB | 首次启动需联网；离线环境不可用 |
-| 不打包 `ffprobe.exe` | ~98MB | 时长探测降级（桌面默认走进程内 ASR，影响面小） |
+| 排除视觉旁路（`cv2.pyd` + `rapidocr`） | ~97MB | 失去「无语音视频画面文字识别」（MV / PPT 录屏场景） |
+| ffmpeg 改首启下载（不随包） | ~98MB | 首次启动需联网；离线环境不可用 |
 | 只保留窗口版 exe | ~26MB | CI 自检与命令行排障失去入口，不推荐 |
 
-组合起来最大可降到约 514MB（解压）/ zip 约 200MB。
+**注意：用户数据绝不会进包。** spec 在 `COLLECT` 之后会显式删除产物目录里的
+`data/` 与 `logs/`——历史上曾因数据目录降级逻辑，把 399MB 的模型与数据库
+打进过发布包。
 完整分析与实测数据见 `docs/plans/2026-09-17-windows-desktop-packaging-design.md` §6。
 
 **Q：要不要用 `--onefile`？**

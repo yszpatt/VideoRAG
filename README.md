@@ -85,27 +85,28 @@ docker compose up -d     # 3. 启动 → http://localhost:8566
 |  | Docker | Windows 桌面包 |
 |---|---|---|
 | 适用场景 | NAS / 家用服务器 / VPS | 个人 Windows 电脑 |
-| 界面 | 浏览器访问 `:8566` | 原生窗口（Edge WebView2） |
+| 界面 | 浏览器访问 `:8566` | 原生窗口（Edge WebView2 内核，无需 .NET） |
 | 运行形态 | 主服务 + 本地 ASR 侧车（两个容器） | 单进程（SenseVoice 进程内推理） |
 | 数据目录 | 挂载卷 `/data` | `%LOCALAPPDATA%\videoRAG` |
 | 数据目录结构 | `db/ lancedb/ notes/ models/ cookies/` | **完全一致**，可互相迁移 |
 
-包内有两个可执行文件，按用途分开：
+包内**只有一个可执行文件**：
 
 | 文件 | 用途 |
 |---|---|
-| `videorag.exe` | **窗口形态**（默认双击这个）：原生窗口，无控制台黑框 |
-| `videorag-cli.exe` | 控制台形态：命令行排障、`--self-test` 自检、`--headless` 当本地服务 |
+| `videorag.exe` | 唯一入口，双击即出原生应用窗口（无控制台黑框、无浏览器标签页） |
 
 ```bat
-videorag.exe                                  :: 原生窗口（默认端口 8566，被占自动顺延）
-videorag.exe --browser                        :: 改用系统浏览器打开
-videorag.exe --headless                       :: 只起服务不开界面（当服务器用）
-videorag-cli.exe --headless --port 9000       :: 指定端口当服务器
-videorag-cli.exe --data-dir D:\vr             :: 指定数据目录
-videorag-cli.exe --self-test                  :: 启动 → 自检 → 退出（排查用）
-videorag-cli.exe --help
+videorag.exe                        :: 原生窗口（默认端口 8566，被占自动顺延）
+videorag.exe --port 9000            :: 指定起始端口
+videorag.exe --data-dir D:\vr       :: 指定数据目录
+videorag.exe --headless             :: 只起服务不开界面（当本地服务器用，不面向终端用户）
+videorag.exe --self-test            :: 启动 → 自检 → 退出（排障用；需在控制台里运行）
+videorag.exe --help
 ```
+
+> 自检时若用窗口版 exe，**请从命令行（cmd / PowerShell）启动**才能看到 `--self-test`
+> 的输出：窗口形态 `console=False`，没有 stdout。
 
 - **日志**：窗口形态没有控制台，日志落在 `<数据目录>\logs\videorag.log`
   （默认 `%LOCALAPPDATA%\videoRAG\logs\videorag.log`）；启动失败会弹窗并指向该文件
@@ -113,11 +114,13 @@ videorag-cli.exe --help
 - **首次使用**：在「设置」页（`Alt+5`）填 LLM API Key；在「本地模型」页下载 SenseVoice（≈240MB）
   与 Embedding（≈190MB）模型
 - **包内已含 ffmpeg**（Windows 静态构建，GPL 授权，由构建脚本获取而非提交仓库）
-- **系统要求**：Windows 10 1803+ / Windows 11。需要 **WebView2 Runtime**（Win11 与多数
-  Win10 已自带）与 **.NET 6+ Desktop Runtime**（注意是 *Desktop* 而不是 Console 版本，
-  窗口宿主用的是桌面框架）
-- **窗口降级链**（自动进行，不会崩）：原生窗口 → 浏览器 `--app` 无地址栏窗口
-  （只需 Edge 或 Chrome，观感接近原生）→ 系统浏览器标签页
+- **系统要求**：Windows 10 1803+ / Windows 11，需要 **Microsoft Edge WebView2 Runtime**
+  （Windows 11 已内置；Windows 10 若曾卸载 Edge 需从
+  [官方页面](https://developer.microsoft.com/microsoft-edge/webview2/) 安装）。
+  **不再需要 .NET Framework / .NET Desktop Runtime** —— 窗口直接调用 WebView2 的
+  Win32/COM 接口（`app/webview2_host.py`），不经过 pythonnet / CLR
+- **没有浏览器降级**：桌面版就是「一个应用程序窗口」。窗口起不来时直接弹窗说明原因
+  （通常是缺 WebView2 Runtime）并写日志，不会悄悄改用浏览器打开
 - **重复启动**：目标端口上若已有实例在跑，只会打开它的界面、不再起第二个服务
   （避免两个进程共写同一个数据目录，SQLite / LanceDB 有损坏风险）
 - **不要与 Docker 同时打开同一个数据目录**：SQLite / LanceDB 是单实例文件库，
@@ -130,6 +133,7 @@ pwsh -File packaging/build-windows.ps1     # 前端 → 依赖 → ffmpeg → Py
 ```
 
 产物：`dist/videoRAG/`（目录形态，可直接运行）与 `dist/videoRAG-<版本>-windows-x64.zip`。
+冒烟测试会用**临时构建**的控制台入口（跑完即删），发布目录里始终只有一个 `videorag.exe`。
 
 > CI：`.github/workflows/build-windows.yml`（**仅手动触发**——不填 tag 只构建产物供下载，
 > 填 tag 则创建 / 更新该 tag 的 Release）。刻意不监听 tag push：否则在网页手动创建 release 时

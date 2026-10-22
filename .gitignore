@@ -10,6 +10,10 @@ __pycache__/
 dist/
 web/node_modules/
 web/dist/
+# 调试/测试用的临时产物根目录（含 VIDEORAG_TEMP_DIR 探针、DPI 测试等）。
+# 不加这条时，跑测试或手动验证会在这里留下目录，容易被误提交。
+/temp/
+/pytest-of-*/
 .workbuddy/
 .codebuddy/
 .data/

@@ -35,7 +35,9 @@ dev = [
 ]
 # Windows 桌面包专用（Docker 镜像不装，保持主镜像轻量）：
 # - sherpa-onnx：进程内 SenseVoice 推理（ASR_LOCAL_BACKEND=inproc）
-# - pywebview：原生窗口（Windows 走 Edge WebView2 后端，经 pythonnet 做 CLR 桥）
+# - pywebview：**仅构建期使用**——提供打包所需的 WebView2Loader.dll；
+#   运行时窗口由 app/webview2_host.py 直连 WebView2 的 Win32/COM 接口，
+#   不 import pywebview，也不需要 pythonnet / .NET。
 # - pyinstaller：打包为本地应用
 desktop = [
     "sherpa-onnx>=1.13",
