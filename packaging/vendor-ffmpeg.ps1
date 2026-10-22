@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     下载 ffmpeg / ffprobe 的 Windows 静态构建到 packaging/vendor/ffmpeg。
 
