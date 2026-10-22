@@ -159,19 +159,50 @@ class UploadVideoResponse(BaseModel):
 
 
 async def _probe_duration(path: Path) -> float | None:
-    """ffprobe 取时长（失败/未装返回 None）：只影响展示与笔记，绝不阻断导入。"""
+    """尽量取到媒体时长（失败/未装返回 None）：只影响展示与笔记，绝不阻断导入。
+
+    两条路径按可用性降级：
+
+    1. ``ffprobe``——最准，但它单独就有约 98MB。桌面发行版**刻意不再捆绑**
+       ffprobe，以减小安装包；用户自己装了就能用上。
+    2. ``ffmpeg -i``——ffmpeg 是必装依赖（抽音/抽帧/合流都要它），它的信息输出
+       里带 ``Duration: HH:MM:SS.ss``，解析出来精度足够展示。
+
+    这样「时长」这项非关键信息不再依赖一个 98MB 的额外二进制。
+    """
     ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
+    if ffprobe:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffprobe, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1", str(path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            return float(out.decode().strip())
+        except Exception:  # noqa: BLE001  解析失败只记 None，继续走 ffmpeg
+            pass
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
         return None
     try:
         proc = await asyncio.create_subprocess_exec(
-            ffprobe, "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=nw=1:nk=1", str(path),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            ffmpeg, "-hide_banner", "-i", str(path),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-        return float(out.decode().strip())
-    except Exception:  # noqa: BLE001  解析失败只记 None
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=20)
+        # ffmpeg 把媒体信息写在 stderr，形如：
+        #   Duration: 00:03:24.56, start: 0.000000, bitrate: 1234 kb/s
+        import re
+
+        m = re.search(rb"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err or b"")
+        if not m:
+            return None
+        h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        total = h * 3600 + mi * 60 + s
+        return total if total > 0 else None
+    except Exception:  # noqa: BLE001
         return None
 
 

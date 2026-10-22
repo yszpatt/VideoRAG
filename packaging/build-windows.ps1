@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     构建 videoRAG Windows 桌面包（onedir + 捆绑 ffmpeg + 冒烟测试 + 打 zip）。
 
@@ -8,14 +8,19 @@
       1. 构建前端          web/  → web/dist（后端静态托管）
       2. 准备 Python 依赖  .venv（含 desktop extra：sherpa-onnx / pyinstaller）
       3. 获取 ffmpeg       packaging/vendor/ffmpeg（构建时下载，不进仓库）
-      4. PyInstaller       packaging/videorag.spec → dist/videoRAG/
+      4. PyInstaller       packaging/videorag.spec → dist/videoRAG/（单一 videorag.exe）
       5. 放置 ffmpeg       dist/videoRAG/vendor/ffmpeg（runtime_env 从这里注入 PATH）
-      6. 冒烟测试          运行打包产物 --self-test，校验 /health 与 /mcp
+      6. 冒烟测试          单独构建控制台入口并跑 --self-test，校验各端点与窗口后端
       7. 打 zip            dist/videoRAG-<版本>-windows-x64.zip
+
+    **发布包只有一个应用程序**：``videorag.exe``（窗口形态，双击即出原生窗口）。
+    控制台入口 ``videorag-cli.exe`` 只在第 6 步临时构建、跑完冒烟即丢弃，不进 zip
+    ——它存在的唯一理由是窗口形态没有 stdout，自检结论打不出来。
 
     第 6 步是这条链路的价值所在：PyInstaller 收集原生包（lancedb / onnxruntime /
     rapidocr / sherpa-onnx）极易漏文件，而漏了往往要等用户跑到某条功能才暴露。
-    把「能不能起来 + MCP 工具列表能不能拿到」变成构建门禁，比事后排查便宜得多。
+    把「能不能起来 + 窗口后端是否可用 + MCP 工具列表能不能拿到」变成构建门禁，
+    比事后排查便宜得多。
 
 .PARAMETER Venv
     Python 虚拟环境目录，默认 .venv。
@@ -38,7 +43,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Venv = (Join-Path $PSScriptRoot '..\.venv'),
+    [string]$Venv,
     [string]$Version,
     [string]$Python = 'python',
     [switch]$SkipWeb,
@@ -48,6 +53,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+# 默认值放在这里算：param() 的默认值求值早于 $PSScriptRoot 可用（-File 调用时会是空串）
+if (-not $PSBoundParameters.ContainsKey('Venv') -or -not $Venv) {
+    $Venv = Join-Path $PSScriptRoot '..\.venv'
+}
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Push-Location $Root
@@ -62,10 +72,9 @@ try {
     }
     Write-Host "videoRAG Windows 构建 —— 版本 $Version"
 
-    $DistApp = Join-Path $Root 'dist\videoRAG'
-    $WindowExe = Join-Path $DistApp 'videorag.exe'   # 窗口形态（用户双击这个）
-    # 自检一律用控制台版：窗口版 console=False，stdout 不可用，检查结果根本打不出来
-    $ExePath = Join-Path $DistApp 'videorag-cli.exe'
+    $SpecPath = Join-Path $PSScriptRoot 'videorag.spec'
+    $DistApp  = Join-Path $Root 'dist\videoRAG'
+    $WindowExe = Join-Path $DistApp 'videorag.exe'   # 发布包唯一入口（用户双击这个）
 
     # ---- 1. 前端 ----
     Step 1 '构建前端（web/dist）'
@@ -129,41 +138,75 @@ try {
         & (Join-Path $PSScriptRoot 'vendor-ffmpeg.ps1')
     }
 
-    # ---- 4. PyInstaller ----
-    Step 4 'PyInstaller 打包（onedir）'
+    # ---- 4. PyInstaller（发布包：单一窗口 exe）----
+    Step 4 'PyInstaller 打包（onedir，单一 videorag.exe）'
     if (Test-Path $DistApp) { Remove-Item $DistApp -Recurse -Force }
-    & $venvPython -m PyInstaller (Join-Path $PSScriptRoot 'videorag.spec') `
+    $env:VIDEORAG_BUILD_CLI = $null
+    & $venvPython -m PyInstaller $SpecPath `
         --noconfirm --distpath (Join-Path $Root 'dist') --workpath (Join-Path $Root 'build')
     if (-not (Test-Path $WindowExe)) { throw "打包产物缺失（窗口版）：$WindowExe" }
-    if (-not (Test-Path $ExePath)) { throw "打包产物缺失（控制台版）：$ExePath" }
+
+    # 发布包里不应出现第二个 exe：显式校验，防止回归成「两个入口」
+    $extraExe = Get-ChildItem $DistApp -Filter '*.exe' -File |
+                Where-Object { $_.Name -ne 'videorag.exe' }
+    if ($extraExe) {
+        throw "发布包内出现多余的可执行文件：$($extraExe.Name -join ', ')"
+    }
 
     # ---- 5. 放置 ffmpeg ----
-    # 与 app/runtime_env.py 的 FFMPEG_SUBDIRS（vendor/ffmpeg）保持一致
-    Step 5 '放置 ffmpeg 到产物目录'
+    # 与 app/runtime_env.py 的 FFMPEG_SUBDIRS（vendor/ffmpeg）保持一致。
+    #
+    # **刻意只发 ffmpeg.exe，不带 ffprobe.exe**：后者单独就有约 98MB，而它在项目里
+    # 只用于「读取视频时长」这一项非关键信息（失败只是时长显示为空，不阻断导入）。
+    # app/api/videos.py 的 _probe_duration 已改为 ffprobe 缺失时用 `ffmpeg -i`
+    # 的输出解析时长，所以省掉 98MB 不影响功能。用户自己装了 ffprobe 仍会优先用它。
+    Step 5 '放置 ffmpeg 到产物目录（只带 ffmpeg，不含 ffprobe）'
     $vendorSrc = Join-Path $PSScriptRoot 'vendor\ffmpeg'
     if (Test-Path (Join-Path $vendorSrc 'ffmpeg.exe')) {
         $vendorDst = Join-Path $DistApp 'vendor\ffmpeg'
         New-Item -ItemType Directory -Path $vendorDst -Force | Out-Null
-        Copy-Item (Join-Path $vendorSrc '*.exe') $vendorDst -Force
-        Write-Host "  → $vendorDst"
+        Copy-Item (Join-Path $vendorSrc 'ffmpeg.exe') $vendorDst -Force
+        Write-Host "  → $vendorDst (ffmpeg.exe)"
     } elseif ($SkipFfmpeg) {
         Write-Host '  未找到捆绑 ffmpeg（-SkipFfmpeg），产物将依赖系统 PATH' -ForegroundColor Yellow
     } else {
         throw '  捆绑 ffmpeg 缺失——请先运行 packaging/vendor-ffmpeg.ps1'
     }
 
-    # ---- 6. 冒烟测试 ----
-    Step 6 '冒烟测试（打包产物自检）'
+    # ---- 6. 冒烟测试（单独构建控制台入口，跑完即删）----
+    Step 6 '冒烟测试（控制台入口自检）'
     if ($SkipSmoke) {
         Write-Host '  已跳过（-SkipSmoke）' -ForegroundColor Yellow
     } else {
-        $smokeData = Join-Path ([IO.Path]::GetTempPath()) ("vr-smoke-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+        $CliDir  = Join-Path $Root 'dist\videoRAG-cli'
+        $CliExe  = Join-Path $CliDir 'videorag-cli.exe'
+        if (Test-Path $CliDir) { Remove-Item $CliDir -Recurse -Force }
         try {
-            # 独立数据目录避免污染真实数据；--self-test 只起服务、不弹窗口，跑完自行退出
-            & $ExePath --self-test --data-dir $smokeData --open-timeout 180
-            if ($LASTEXITCODE -ne 0) { throw "冒烟测试失败（exit $LASTEXITCODE）" }
+            $env:VIDEORAG_BUILD_CLI = '1'
+            & $venvPython -m PyInstaller $SpecPath `
+                --noconfirm --distpath (Join-Path $Root 'dist') --workpath (Join-Path $Root 'build-cli')
+            if (-not (Test-Path $CliExe)) { throw "控制台入口构建失败：$CliExe" }
+
+            # 让冒烟用的控制台入口也能找到 ffmpeg（与发布包同布局，同样不含 ffprobe）
+            $cliVendor = Join-Path $CliDir 'vendor\ffmpeg'
+            if (Test-Path (Join-Path $vendorSrc 'ffmpeg.exe')) {
+                New-Item -ItemType Directory -Path $cliVendor -Force | Out-Null
+                Copy-Item (Join-Path $vendorSrc 'ffmpeg.exe') $cliVendor -Force
+            }
+
+            $smokeData = Join-Path ([IO.Path]::GetTempPath()) ("vr-smoke-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                # 独立数据目录避免污染真实数据；--self-test 只起服务、不弹窗口，跑完自行退出
+                & $CliExe --self-test --data-dir $smokeData --open-timeout 180
+                if ($LASTEXITCODE -ne 0) { throw "冒烟测试失败（exit $LASTEXITCODE）" }
+            } finally {
+                if (Test-Path $smokeData) { Remove-Item $smokeData -Recurse -Force -ErrorAction SilentlyContinue }
+            }
         } finally {
-            if (Test-Path $smokeData) { Remove-Item $smokeData -Recurse -Force -ErrorAction SilentlyContinue }
+            $env:VIDEORAG_BUILD_CLI = $null
+            if (Test-Path $CliDir) { Remove-Item $CliDir -Recurse -Force -ErrorAction SilentlyContinue }
+            $cliWork = Join-Path $Root 'build-cli'
+            if (Test-Path $cliWork) { Remove-Item $cliWork -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
 
