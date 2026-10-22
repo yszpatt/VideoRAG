@@ -106,39 +106,68 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # init_db 必须最先完成：下面的 recover / sweep 都依赖数据表已就绪。
         await init_db(engine, settings)
-        # LanceDB chunks 表 kind 列幂等迁移：老库无 kind 时整表重建补列（保留向量），
-        # 重建会丢 FTS 索引，迁移成功即重建索引。假 store（测试注入）无此方法则跳过。
-        try:
-            if await asyncio.to_thread(vector_store.ensure_kind):
-                await asyncio.to_thread(vector_store.ensure_fts_index)
-        except AttributeError:
-            pass
-        recovered = await q.recover()
-        if recovered:
-            print(f"[queue] recovered {recovered} interrupted task(s)")
-        # 启动清扫临时媒体（downloads/audio/transcripts）：清掉被杀进程/失败路径
-        # 遗留的文件。此刻 worker 未启动且 recover 已把 running 重置为 pending，
-        # 清扫安全（被重置的任务会重新下载）。
-        try:
-            swept = await asyncio.to_thread(sweep_temp_media, settings.data_dir)
-            if swept:
-                print(f"[startup] swept {swept} stale temp media file(s)")
-        except Exception as e:  # 清扫失败不应阻断启动
-            print(f"[startup] temp media sweep skipped: {e}")
-        # 归档目录启动校验（新增，可选能力）：提前暴露「卷没挂 / 属主不对」，
-        # 避免第一条视频归档失败时才发现；未配置或不可用仅告警，不阻断启动。
-        if settings.media_save_dir:
+
+        # 后面几步彼此**没有依赖**，并行跑能缩短启动时间（尤其数据多时，
+        # sweep 要递归扫描 downloads/audio/transcripts 三个目录）。
+        # 串行时总耗时是各项之和，并行后约等于最慢的那一项。
+        async def _migrate_vector_store() -> None:
+            # LanceDB chunks 表 kind 列幂等迁移：老库无 kind 时整表重建补列（保留向量），
+            # 重建会丢 FTS 索引，迁移成功即重建索引。假 store（测试注入）无此方法则跳过。
             try:
-                ok = await asyncio.to_thread(
-                    ensure_archive_dir, settings.media_save_dir, settings.data_dir
-                )
-                print(
-                    f"[startup] media archive dir {settings.media_save_dir}: "
-                    f"{'ready' if ok else 'unavailable (see warning above)'}"
-                )
-            except Exception as e:  # 校验异常不应阻断启动
-                print(f"[startup] media archive check skipped: {e}")
+                if await asyncio.to_thread(vector_store.ensure_kind):
+                    await asyncio.to_thread(vector_store.ensure_fts_index)
+            except AttributeError:
+                pass
+
+        async def _recover_queue() -> int:
+            return await q.recover()
+
+        async def _sweep_temp() -> int:
+            # 启动清扫临时媒体（downloads/audio/transcripts）：清掉被杀进程/失败路径
+            # 遗留的文件。此刻 worker 未启动且 recover 已把 running 重置为 pending，
+            # 清扫安全（被重置的任务会重新下载）。
+            return await asyncio.to_thread(sweep_temp_media, settings.data_dir)
+
+        async def _check_archive() -> bool | None:
+            # 归档目录启动校验（可选能力）：提前暴露「卷没挂 / 属主不对」，
+            # 避免第一条视频归档失败时才发现；未配置或不可用仅告警，不阻断启动。
+            if not settings.media_save_dir:
+                return None
+            return await asyncio.to_thread(
+                ensure_archive_dir, settings.media_save_dir, settings.data_dir
+            )
+
+        results = await asyncio.gather(
+            _migrate_vector_store(),
+            _recover_queue(),
+            _sweep_temp(),
+            _check_archive(),
+            return_exceptions=True,
+        )
+        migrated, recovered, swept, archive_ok = results
+
+        for name, res in (
+            ("向量库迁移", migrated),
+            ("队列恢复", recovered),
+            ("临时媒体清扫", swept),
+            ("归档目录校验", archive_ok),
+        ):
+            if isinstance(res, BaseException):
+                # 各自失败都不该阻断启动（与原先的容错语义一致）
+                print(f"[startup] {name} skipped: {type(res).__name__}: {res}")
+
+        if isinstance(recovered, int) and recovered:
+            print(f"[queue] recovered {recovered} interrupted task(s)")
+        if isinstance(swept, int) and swept:
+            print(f"[startup] swept {swept} stale temp media file(s)")
+        if settings.media_save_dir and not isinstance(archive_ok, BaseException):
+            print(
+                f"[startup] media archive dir {settings.media_save_dir}: "
+                f"{'ready' if archive_ok else 'unavailable (see warning above)'}"
+            )
+
         worker = asyncio.create_task(start_workers(q, settings.max_concurrent_tasks))
         try:
             async with mcp_session_manager.run():  # MCP session 管理器随应用生命周期启停
