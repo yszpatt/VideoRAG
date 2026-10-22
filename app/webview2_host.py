@@ -70,6 +70,26 @@ GWLP_WNDPROC = -4
 # （WebView2 只在循环运行时才接受 Navigate，见 WebView2Window._run_inner）
 WM_APP_NAVIGATE = 0x8001
 
+# --- DPI 感知相关常量 ---
+#
+# 这是「界面整体发虚」的根因所在：进程若未声明 DPI 感知，Windows 会按
+# DPI 虚拟化（DPI virtualization）把 125% / 150% 缩放下**整块窗口位图**先按
+# 逻辑分辨率渲染、再由 DWM 位图拉伸到物理像素——文字笔画和 1px 边框都会被
+# 双线性插值糊掉，无论 CSS 多精细都无法挽回。
+#
+# 实测（本机 1920x1080、系统缩放 125%）：未声明时 GetSystemMetrics 报 1536x864，
+# 声明 PER_MONITOR_AWARE_V2 后报 1920x1080 并切到 DPI_AWARENESS_PER_MONITOR_AWARE(2)，
+# 即渲染确实发生在物理像素上。
+#
+# 必须在**创建任何窗口之前**设置（Win32 的 DPI 感知一旦生效不可退回），
+# 因此调用点放在 run() 最开头，早于 create()。
+_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = ctypes.c_void_p(-3)
+_DPI_AWARENESS_CONTEXT_SYSTEM_AWARE = ctypes.c_void_p(-2)
+
+#: 进程级 DPI 感知是否已处理过（Win32 只认第一次设置，重复调用无意义）
+_dpi_configured = False
+
 S_OK = 0
 E_NOINTERFACE = 0x80004002
 
@@ -276,6 +296,40 @@ def _declare_win32() -> None:
     u.MessageBoxW.argtypes = [c_void_p, c_wchar_p, c_wchar_p, c_uint]
     u.MessageBoxW.restype = c_int
 
+    # DPI 感知（见 ensure_dpi_aware 的说明）
+    if hasattr(u, "SetProcessDpiAwarenessContext"):
+        u.SetProcessDpiAwarenessContext.argtypes = [c_void_p]
+        u.SetProcessDpiAwarenessContext.restype = ctypes.c_bool
+    u.SetProcessDPIAware.argtypes = []
+    u.SetProcessDPIAware.restype = ctypes.c_bool
+
+    # 按 DPI 建窗/改窗（DPI 感知后所有坐标都是物理像素，尺寸必须按比例换算）
+    if hasattr(u, "AdjustWindowRectExForDpi"):
+        u.AdjustWindowRectExForDpi.argtypes = [
+            POINTER(_RECT), ctypes.c_uint, ctypes.c_bool, ctypes.c_uint, c_uint,
+        ]
+        u.AdjustWindowRectExForDpi.restype = ctypes.c_bool
+    if hasattr(u, "GetDpiForWindow"):
+        u.GetDpiForWindow.argtypes = [c_void_p]
+        u.GetDpiForWindow.restype = c_uint
+    if hasattr(u, "GetDpiForSystem"):
+        u.GetDpiForSystem.argtypes = []
+        u.GetDpiForSystem.restype = c_uint
+    u.SetWindowPos.argtypes = [
+        c_void_p, c_void_p, c_int, c_int, c_int, c_int, ctypes.c_uint,
+    ]
+    u.SetWindowPos.restype = ctypes.c_bool
+    # 工作区（收敛窗口尺寸用）
+    u.SystemParametersInfoW.argtypes = [c_uint, c_uint, c_void_p, c_uint]
+    u.SystemParametersInfoW.restype = ctypes.c_bool
+    # DPI 兜底换算用（句柄在 64 位必须声明为 c_void_p，否则会被截断）
+    u.GetDC.argtypes = [c_void_p]
+    u.GetDC.restype = c_void_p
+    u.ReleaseDC.argtypes = [c_void_p, c_void_p]
+    u.ReleaseDC.restype = c_int
+    g.GetDeviceCaps.argtypes = [c_void_p, c_int]
+    g.GetDeviceCaps.restype = c_int
+
     g.CreateSolidBrush.argtypes = [ctypes.c_uint]
     g.CreateSolidBrush.restype = c_void_p
 
@@ -285,6 +339,123 @@ _declare_win32()
 # RegisterClassExW 需要的窗口类名；进程内只注册一次
 _WINDOW_CLASS = "VideoRAGWebView2Window"
 _class_registered = False
+
+
+def _system_dpi() -> int:
+    """系统 DPI（96 = 100%，120 = 125%）。
+
+    必须在 :func:`ensure_dpi_aware` **之后**调用：未声明 DPI 感知时系统会
+    谎报 96，据此换算出的窗口尺寸会偏小。
+    """
+    try:
+        if hasattr(_user32, "GetDpiForSystem"):
+            dpi = _user32.GetDpiForSystem()
+            if dpi and dpi > 0:
+                return int(dpi)
+    except Exception:  # noqa: BLE001  老系统没有 GetDpiForSystem
+        pass
+    try:
+        hdc = _user32.GetDC(None)
+        if hdc:
+            try:
+                # GetDeviceCaps(LOGPIXELSX=88)
+                dpi = _gdi32.GetDeviceCaps(hdc, 88)
+            finally:
+                _user32.ReleaseDC(None, hdc)
+            if dpi and dpi > 0:
+                return int(dpi)
+    except Exception:  # noqa: BLE001
+        pass
+    return 96
+
+
+def _dpi_scale() -> float:
+    """当前系统 DPI 的缩放比（96 DPI → 1.0，120 DPI → 1.25）。"""
+    return _system_dpi() / 96.0
+
+
+def _scaled(css_px: int, scale: float) -> int:
+    """把设计稿 CSS 像素换算成物理像素（并夹到合理下限）。"""
+    return max(int(round(css_px * scale)), 1)
+
+
+def _work_area_size() -> tuple[int, int]:
+    """主显示器工作区（不含任务栏）的物理像素尺寸；拿不到返回 (0, 0)。
+
+    用途是把按 DPI 换算后的窗口尺寸收敛到屏幕内。没有这一步时，1360x900 的
+    设计尺寸在 125% 缩放下会变成 1700x1125，比 1080p 屏幕的可用高度还大。
+    """
+    try:
+        rect = _RECT()
+        # SPI_GETWORKAREA = 0x0030
+        if _user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return rect.right - rect.left, rect.bottom - rect.top
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return _user32.GetSystemMetrics(0), _user32.GetSystemMetrics(1)
+    except Exception:  # noqa: BLE001
+        return 0, 0
+
+
+def ensure_dpi_aware() -> str:
+    """让本进程按**物理像素**渲染，避免 Windows 位图拉伸导致整窗发虚。
+
+    问题
+    ----
+    Windows 默认把没有声明 DPI 感知的进程当作「DPI 无关」程序：在 125% / 150%
+    缩放下，系统先按逻辑分辨率（物理尺寸 / 缩放比）渲染整块窗口，再由 DWM
+    用双线性插值放大到物理像素。后果是**所有内容一起变糊**——中文字笔画、
+    1px 边框、图标、缩略图，无论前端 CSS 怎么调都救不回来。这正是「应用里
+    看着有点模糊」的根因，且它与页面自身的排版无关。
+
+    先声明 DPI 感知，页面就按物理像素直接渲染：1920x1080 的屏幕拿到的是
+    1920x1080 的画布，而不是 1536x864 拉伸后的结果。
+
+    为什么优先 V2
+    -------------
+    * ``PER_MONITOR_AWARE_V2``：多显示器、不同缩放下都正确，且窗口跨屏时
+      不糊（Win10 1703+）；
+    * 退 ``PER_MONITOR_AWARE``（Win8.1+）；
+    * 再退 ``SetProcessDPIAware()``（Vista+ 的旧接口，仅系统级）；
+    * 全部拿不到时保持系统默认，并在日志里说明——此时界面仍会发虚，但至少
+      不因为设置失败而让窗口起不来。
+
+    **必须在创建任何窗口之前调用**：DPI 感知一旦生效不可撤回，窗口已创建后
+    再声明会让已有窗口尺寸语义前后不一致。
+
+    返回实际生效的档位名（供日志/自检展示）。
+    """
+    global _dpi_configured
+    if _dpi_configured:
+        return "already-configured"
+    _dpi_configured = True
+
+    u = _user32
+    # 1) Per-Monitor V2（最佳）
+    if hasattr(u, "SetProcessDpiAwarenessContext"):
+        for name, ctx in (
+            ("per-monitor-v2", _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
+            ("per-monitor", _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE),
+            ("system", _DPI_AWARENESS_CONTEXT_SYSTEM_AWARE),
+        ):
+            try:
+                if u.SetProcessDpiAwarenessContext(ctx):
+                    log.info("DPI 感知已设为 %s（按物理像素渲染，界面不再被系统拉伸）", name)
+                    return name
+            except Exception:  # noqa: BLE001
+                continue
+    # 2) 旧接口兜底（Win7/8 或无 SetProcessDpiAwarenessContext 的环境）
+    try:
+        if u.SetProcessDPIAware():
+            log.info("DPI 感知已设为 system（旧接口 SetProcessDPIAware）")
+            return "system-legacy"
+    except Exception:  # noqa: BLE001
+        pass
+    log.warning(
+        "未能声明 DPI 感知：系统缩放不是 100%% 时，整个窗口可能被位图拉伸而显得模糊"
+    )
+    return "unaware"
 
 
 # ---------------------------------------------------------------------------
@@ -1067,8 +1238,22 @@ class WebView2Window:
                 return 0
             if msg == WM_GETMINMAXINFO:
                 mmi = ctypes.cast(lparam, POINTER(_MINMAXINFO)).contents
-                mmi.ptMinTrackSize_x = self.min_size[0]
-                mmi.ptMinTrackSize_y = self.min_size[1]
+                # DPI 感知后这里的单位是物理像素，而 min_size 是 CSS 像素：
+                # 不换算的话，125% 缩放下「最小窗口」会比设计值小一圈，
+                # 布局会在本不该允许的窄宽度下被压扁。
+                #
+                # 优先用**该窗口所在显示器**的 DPI：多屏且缩放不同时，用系统
+                # DPI 会让副屏上的最小尺寸算错（窗口拖过去后被允许缩得过小）。
+                scale = _dpi_scale()
+                try:
+                    if hasattr(_user32, "GetDpiForWindow") and hwnd:
+                        dpi = _user32.GetDpiForWindow(hwnd)
+                        if dpi and dpi > 0:
+                            scale = dpi / 96.0
+                except Exception:  # noqa: BLE001
+                    pass
+                mmi.ptMinTrackSize_x = _scaled(self.min_size[0], scale)
+                mmi.ptMinTrackSize_y = _scaled(self.min_size[1], scale)
                 return 0
             if msg == WM_CLOSE:
                 _user32.DestroyWindow(hwnd)
@@ -1123,13 +1308,44 @@ class WebView2Window:
         return _WINDOW_CLASS
 
     def create(self) -> None:
-        """创建顶层窗口（此时不显示）。"""
+        """创建顶层窗口（此时不显示）。
+
+        DPI 感知之后 Win32 的坐标全部是**物理像素**，而 ``width``/``height``
+        是设计稿里的 CSS 像素（如 1360x900）。在 125% 缩放下若直接把 1360 当
+        物理像素用，视口会变窄 20%、布局被挤；反过来直接把窗口放大 1.25 倍
+        又会让界面元素显得过大。因此这里按当前 DPI 把「CSS 尺寸」换算成物理
+        尺寸：视口逻辑宽度仍是 1360，只是由更多物理像素呈现（于是更清晰）。
+        """
         cls = self._register_class()
         hinst = _kernel32.GetModuleHandleW(None)
 
-        # 按目标客户区尺寸反推外框
-        rect = _RECT(0, 0, self.width, self.height)
-        _user32.AdjustWindowRectEx(ctypes.byref(rect), WS_OVERLAPPEDWINDOW, False, 0)
+        # 按目标客户区尺寸反推外框（尺寸先换算到物理像素）
+        dpi = _system_dpi()
+        scale = dpi / 96.0
+        cw, ch = _scaled(self.width, scale), _scaled(self.height, scale)
+        # 关键：DPI 感知后尺寸是物理像素，设计稿的 1360x900 在 125% 下会变成
+        # 1700x1125——**比 1080p 屏幕还高**，窗口会顶出屏幕（标题栏/底栏看不见）。
+        # 因此必须按工作区上限收敛；收敛后仍保证客户区不小于 min_size。
+        avail_w, avail_h = _work_area_size()
+        if avail_w and avail_h:
+            max_cw = max(avail_w - 40, _scaled(self.min_size[0], scale))
+            max_ch = max(avail_h - 40, _scaled(self.min_size[1], scale))
+            cw, ch = min(cw, max_cw), min(ch, max_ch)
+        rect = _RECT(0, 0, cw, ch)
+        # AdjustWindowRectEx 不感知 DPI，在非 96 DPI 下边框/标题栏厚度会算错
+        # （窗口客户区比预期大或小几个像素）；优先用 ForDpi 版本。
+        adjusted = False
+        if hasattr(_user32, "AdjustWindowRectExForDpi"):
+            try:
+                adjusted = bool(
+                    _user32.AdjustWindowRectExForDpi(
+                        ctypes.byref(rect), WS_OVERLAPPEDWINDOW, False, 0, dpi
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                adjusted = False
+        if not adjusted:
+            _user32.AdjustWindowRectEx(ctypes.byref(rect), WS_OVERLAPPEDWINDOW, False, 0)
         w, h = rect.right - rect.left, rect.bottom - rect.top
 
         hwnd = _user32.CreateWindowExW(
@@ -1405,6 +1621,8 @@ class WebView2Window:
     # ---- 主流程 ----
     def run(self, url: str) -> int:
         """建窗 → 装配 WebView2 → 导航 → 消息循环直到关闭。"""
+        # 必须在 create() 之前：DPI 感知只在窗口创建前声明才生效
+        ensure_dpi_aware()
         _co_initialize()
         try:
             return self._run_inner(url)

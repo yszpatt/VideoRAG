@@ -416,3 +416,107 @@ def test_window_failure_text_has_diagnostics_and_next_steps(monkeypatch, tmp_pat
     assert str(tmp_path / "WebView2Loader.dll") in text
     assert h.WEBVIEW2_DOWNLOAD_URL in text
     assert "--headless" in text
+
+# ---------- DPI 感知（界面发虚的根因） ----------
+
+def test_ensure_dpi_aware_is_idempotent(monkeypatch):
+    """DPI 感知只应真正设置一次：Win32 只认第一次，重复设置会改变返回值语义。"""
+    calls = []
+
+    class _U:
+        def SetProcessDpiAwarenessContext(self, ctx):
+            calls.append(ctx)
+            return True
+
+        def SetProcessDPIAware(self):
+            calls.append("legacy")
+            return True
+
+    monkeypatch.setattr(h, "_user32", _U())
+    monkeypatch.setattr(h, "_dpi_configured", False)
+
+    first = h.ensure_dpi_aware()
+    second = h.ensure_dpi_aware()
+
+    assert first == "per-monitor-v2"
+    assert second == "already-configured"
+    assert len(calls) == 1, "第二次调用不应再次设置进程 DPI 感知"
+
+
+def test_ensure_dpi_aware_falls_back_when_context_api_missing(monkeypatch):
+    """老系统没有 SetProcessDpiAwarenessContext 时必须退回 SetProcessDPIAware。"""
+    used = []
+
+    class _U:
+        def SetProcessDPIAware(self):
+            used.append("legacy")
+            return True
+
+    monkeypatch.setattr(h, "_user32", _U())
+    monkeypatch.setattr(h, "_dpi_configured", False)
+
+    assert h.ensure_dpi_aware() == "system-legacy"
+    assert used == ["legacy"]
+
+
+def test_ensure_dpi_aware_reports_unaware_when_everything_fails(monkeypatch):
+    """全部接口都失败时返回 unaware，且**不能抛异常**——窗口仍应能打开。"""
+
+    class _U:
+        def SetProcessDpiAwarenessContext(self, ctx):
+            return False
+
+        def SetProcessDPIAware(self):
+            return False
+
+    monkeypatch.setattr(h, "_user32", _U())
+    monkeypatch.setattr(h, "_dpi_configured", False)
+
+    assert h.ensure_dpi_aware() == "unaware"
+
+
+def test_scaled_uses_dpi_ratio():
+    """设计稿 CSS 像素换算物理像素：125% 下 1360x900 应变成 1700x1125。"""
+    assert h._scaled(1360, 1.25) == 1700
+    assert h._scaled(900, 1.25) == 1125
+    assert h._scaled(1360, 1.0) == 1360
+    # 下限保护：任何输入都不能得到 0 或负数
+    assert h._scaled(0, 1.25) == 1
+
+
+def test_window_size_is_clamped_to_work_area(monkeypatch):
+    """DPI 感知后窗口是物理像素：1360x900@125% = 1700x1125 会高于 1080p 屏幕。
+
+    必须收敛到工作区内，否则标题栏或底栏会被挤出屏幕。
+    """
+    monkeypatch.setattr(h, "_dpi_configured", True)
+    monkeypatch.setattr(h, "_system_dpi", lambda: 120)
+    monkeypatch.setattr(h, "_work_area_size", lambda: (1920, 1042))
+
+    win = h.WebView2Window(width=1360, height=900)
+    captured = {}
+
+    class _K:
+        @staticmethod
+        def GetModuleHandleW(_):
+            return 1
+
+    class _U:
+        @staticmethod
+        def AdjustWindowRectEx(rect, *_a):
+            return True
+
+        @staticmethod
+        def CreateWindowExW(_ex, _cls, _title, _style, _x, _y, w, h, *_rest):
+            captured["w"], captured["h"] = w, h
+            return 0x1234
+
+    monkeypatch.setattr(h, "_kernel32", _K())
+    monkeypatch.setattr(h, "_user32", _U())
+    monkeypatch.setattr(win, "_register_class", lambda: "Cls")
+
+    win.create()
+
+    assert captured["h"] <= 1042, "窗口高度必须落进工作区，不能超出屏幕"
+    assert captured["w"] <= 1920
+    assert captured["w"] >= h._scaled(1000, 1.25), "收敛后仍不得小于最小宽度"
